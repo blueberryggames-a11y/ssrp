@@ -54,6 +54,7 @@ end
 local modWatchToggle  = nil
 local antiFlingToggle = nil
 local v2SpeedToggle   = nil
+local Window          = nil  -- forward declared; assigned after CreateWindow
 
 -- ============================================================
 --  TAG SYSTEM
@@ -63,6 +64,7 @@ local _tagState = nil
 local function freeTag()
     if _tagState == "free" then return end
     if _tagState == "premium" then LOG("TAG","freeTag skipped — premium already applied"); return end
+    if not Window then LOG("TAG","freeTag skipped — Window not ready"); return end
     _tagState = "free"
     Window:Tag({ Title="Free", Icon="crown", Color=Color3.fromHex("#555555"), Radius=6 })
     LOG("TAG","freeTag applied")
@@ -71,6 +73,7 @@ end
 local function premiumTag()
     if _tagState == "premium" then return end
     if _tagState == "free" then LOG("TAG","premiumTag skipped — free tag already shown"); return end
+    if not Window then LOG("TAG","premiumTag skipped — Window not ready"); return end
     _tagState = "premium"
     Window:Tag({ Title="⭐ Premium", Icon="crown", Color=Color3.fromHex("#B8860B"), Radius=6 })
     task.spawn(function()
@@ -117,31 +120,125 @@ local function applyPremium(value, source, expires)
 end
 
 -- ============================================================
---  RESOLVE AUTH RESULT
+--  RESOLVE AUTH RESULT  (FIXED — handles V4.3 Cookies fields)
 -- ============================================================
 local function resolveResult(result)
-    if type(result) ~= "table" then LOG("KEYSYSTEM","not a table, type =",type(result)); return false,false,"Never" end
-    local isSuccess = result.success==true or result.valid==true or result.authorized==true or result.ok==true
-    local isPrem = result.isPremium==true or result.premium==true or result.is_premium==true or result.Premium==true
-        or (type(result.tier)=="string" and result.tier:lower()=="premium")
-        or (type(result.plan)=="string" and result.plan:lower()=="premium")
-        or (type(result.rank)=="string" and result.rank:lower()=="premium")
-    local expires = tostring(result.expires or result.expiry or result.expiresAt or result.expire_at or "Never")
-    LOG("KEYSYSTEM","RESOLVED → success=",tostring(isSuccess),"premium=",tostring(isPrem),"expires=",expires)
+    if type(result) ~= "table" then
+        LOG("KEYSYSTEM","resolveResult: not a table, type =", type(result))
+        return false, false, "Never"
+    end
+
+    -- Debug dump — shows every key/value so you can spot new field names
+    LOG("KEYSYSTEM","RAW RESULT DUMP:")
+    for k, v in pairs(result) do
+        LOG("KEYSYSTEM","  " .. tostring(k) .. " = " .. tostring(v))
+    end
+
+    -- V4.3 Cookies returns { success, isPremium, error, expires }
+    -- Broaden the success check to cover any reasonable field name
+    local isSuccess = result.success      == true
+        or result.valid        == true
+        or result.authorized   == true
+        or result.ok           == true
+        or result.authenticated == true
+        or result.auth         == true
+        or result.passed       == true
+
+    -- If success is explicitly false, don't let other fields override it
+    if result.success == false or result.valid == false or result.authorized == false then
+        isSuccess = false
+    end
+
+    -- Premium detection — cover every reasonable field name / type
+    local isPrem = false
+    if result.isPremium    == true  then isPrem = true end
+    if result.premium      == true  then isPrem = true end
+    if result.is_premium   == true  then isPrem = true end
+    if result.Premium      == true  then isPrem = true end
+    if result.isPremium    == 1     then isPrem = true end  -- some libs return 1/0
+    if result.premium      == 1     then isPrem = true end
+    if type(result.tier)   == "string" and result.tier:lower()   == "premium" then isPrem = true end
+    if type(result.plan)   == "string" and result.plan:lower()   == "premium" then isPrem = true end
+    if type(result.rank)   == "string" and result.rank:lower()   == "premium" then isPrem = true end
+    if type(result.level)  == "string" and result.level:lower()  == "premium" then isPrem = true end
+    if type(result.role)   == "string" and result.role:lower()   == "premium" then isPrem = true end
+    if type(result.group)  == "string" and result.group:lower()  == "premium" then isPrem = true end
+    if type(result.package)== "string" and result.package:lower()== "premium" then isPrem = true end
+
+    -- Expiry — cover every reasonable field name
+    local expires = result.expires
+        or result.expiry
+        or result.expiresAt
+        or result.expire_at
+        or result.expiration
+        or result.exp
+        or result.validUntil
+        or result.valid_until
+        or "Never"
+    expires = tostring(expires)
+
+    LOG("KEYSYSTEM","RESOLVED → success=" .. tostring(isSuccess) .. "  premium=" .. tostring(isPrem) .. "  expires=" .. expires)
     return isSuccess, isPrem, expires
+end
+
+-- ============================================================
+--  KEY FILE HELPERS
+--  Panda V4.3 saves keys as <workspace>/CBD/<hwid>.key
+--  We scan the CBD folder for any .key file and read it directly
+--  so we never depend on loadSavedKey() working correctly.
+-- ============================================================
+local KEY_FOLDER = "CBD"
+
+local function findSavedKeyFromDisk()
+    -- Try Cookies.loadSavedKey first (works on some executors)
+    if Cookies and type(Cookies.loadSavedKey) == "function" then
+        local ok, val = pcall(function() return Cookies.loadSavedKey() end)
+        if ok and val and val ~= "" then
+            LOG("AUTO","loadSavedKey() returned a key")
+            return val
+        end
+    end
+    -- Fallback: scan the CBD folder for .key files directly
+    if type(listfiles) ~= "function" or type(readfile) ~= "function" then
+        LOG("AUTO","listfiles/readfile not available on this executor")
+        return nil
+    end
+    local ok, files = pcall(listfiles, KEY_FOLDER)
+    if not ok or not files then LOG("AUTO","listfiles failed for:", KEY_FOLDER); return nil end
+    LOG("AUTO","Scanning", KEY_FOLDER, "—", #files, "file(s)")
+    for _, path in ipairs(files) do
+        LOG("AUTO","  checking:", tostring(path))
+        if tostring(path):sub(-4):lower() == ".key" then
+            local rok, content = pcall(readfile, path)
+            if rok and content and #content > 8 then
+                local key = content:match("^%s*(.-)%s*$")
+                if key and #key > 8 then
+                    LOG("AUTO","Key found in:", tostring(path), "len:", #key)
+                    return key
+                end
+            end
+        end
+    end
+    LOG("AUTO","No .key file found in", KEY_FOLDER)
+    return nil
+end
+
+local function saveKeyToDisk(keyStr)
+    if not keyStr or keyStr == "" then return end
+    if Cookies and type(Cookies.saveKey) == "function" then
+        pcall(function() Cookies.saveKey(keyStr) end)
+        LOG("AUTO","Cookies.saveKey called")
+    end
 end
 
 -- ============================================================
 --  AUTO-VALIDATE SAVED KEY
 -- ============================================================
 local function tryAutoValidate()
-    if not Cookies then return false end
-    if type(Cookies.loadSavedKey) ~= "function" then LOG("AUTO","loadSavedKey not available"); return false end
-    local savedKey
-    local ok, err = pcall(function() savedKey = Cookies.loadSavedKey() end)
-    if not ok then LOG("AUTO","loadSavedKey error:", err); return false end
+    if not Cookies then LOG("AUTO","No Cookies lib"); return false end
+    local savedKey = findSavedKeyFromDisk()
     if not savedKey or savedKey == "" then LOG("AUTO","No saved key found"); return false end
-    LOG("AUTO","Saved key found — auto-validating...")
+    LOG("AUTO","Key found, length =", #savedKey, "— validating...")
     WindUI:Notify({ Title="Auto-Login", Content="Validating saved key...", Icon="loader", Duration=3 })
     local vok, result = pcall(function() return Cookies.validate(savedKey) end)
     if not vok then
@@ -155,7 +252,7 @@ local function tryAutoValidate()
         WindUI:Notify({ Title="✅ Auto-Login", Content=(isPrem and "⭐ Premium" or "Free").." • Expires: "..expires, Icon="check-circle", Duration=5 })
     else
         local reason = type(result)=="table" and tostring(result.error or result.message or result.reason or "Invalid key") or "Invalid key"
-        WindUI:Notify({ Title="Auto-Login: "..reason, Content="Re-enter your key in the key system.", Icon="x-circle", Duration=5 })
+        WindUI:Notify({ Title="Auto-Login Failed: "..reason, Content="Re-enter your key in the key system.", Icon="x-circle", Duration=5 })
     end
     return true
 end
@@ -163,7 +260,7 @@ end
 -- ============================================================
 --  WINDOW
 -- ============================================================
-local Window = WindUI:CreateWindow({
+Window = WindUI:CreateWindow({
     Title="Containment Breach Deluxe", Icon="shield-alert", Author="CBD",
     Transparent=true, Theme="Dark", Size=UDim2.fromOffset(450,550),
     Folder="CBD", HideSearchBar=false,
@@ -178,33 +275,61 @@ local Window = WindUI:CreateWindow({
         end,
     },
     KeySystem={
-        Note="Enter your key below. Keys are not saved — re-enter each session.",
-        SaveKey=false,
+        Note="Enter your key below. Your key is saved locally for auto-login next session.",
+        SaveKey=true,
         API={{ Title="Containment Breach Deluxe", Desc="Click 'Get Key' to obtain your key.", Icon="shield-alert", Type="pandadevelopment", ServiceId="scprp" }},
         Callback=function(enteredKey)
-            LOG("KEYSYSTEM","Callback received, type =",type(enteredKey),"value =",tostring(enteredKey))
+            LOG("KEYSYSTEM","Callback received, type =", type(enteredKey), "value =", tostring(enteredKey))
             task.spawn(function()
+                -- WindUI pre-resolved the key into a table already
+                -- This happens when Type="pandadevelopment" — WindUI calls Panda internally
+                -- and passes back the result. We still need to saveKey ourselves.
                 if type(enteredKey) == "table" then
+                    LOG("KEYSYSTEM","WindUI pre-resolved path — RAW DUMP:")
+                    for k, v in pairs(enteredKey) do
+                        LOG("KEYSYSTEM","  " .. tostring(k) .. " = " .. tostring(v))
+                    end
                     local isSuccess, isPrem, expires = resolveResult(enteredKey)
                     if isSuccess then
+                        -- Save the raw key string — check every field WindUI might store it in
+                        local rawKey = enteredKey.key or enteredKey.keyValue or enteredKey.licenseKey
+                            or enteredKey.license or enteredKey.keyString or enteredKey.value or nil
+                        if rawKey then saveKeyToDisk(rawKey) end
                         applyPremium(isPrem, "WindUI-PreResolved", expires)
                         WindUI:Notify({ Title="✅ Key Valid", Content=(isPrem and "⭐ Premium" or "Free").." • Expires: "..expires, Icon="check-circle", Duration=5 })
                     else
-                        WindUI:Notify({ Title="❌ "..(tostring(enteredKey.error or enteredKey.message or "Invalid key")), Content="Get a key at pandauth.com", Icon="x-circle", Duration=6 })
+                        local reason = tostring(enteredKey.error or enteredKey.message or enteredKey.reason or "Invalid key")
+                        WindUI:Notify({ Title="❌ "..reason, Content="Get a key at pandauth.com", Icon="x-circle", Duration=6 })
                     end
                     return
                 end
-                if not Cookies then WindUI:Notify({ Title="Auth Error", Content="Panda library failed to load.", Icon="wifi-off", Duration=6 }); return end
-                if type(enteredKey)~="string" or #enteredKey<3 then WindUI:Notify({ Title="Auth Error", Content="Key appears empty or malformed.", Icon="x-circle", Duration=4 }); return end
+
+                -- Manual string key path — validate via Cookies lib
+                if not Cookies then
+                    WindUI:Notify({ Title="Auth Error", Content="Panda library failed to load.", Icon="wifi-off", Duration=6 })
+                    return
+                end
+                if type(enteredKey) ~= "string" or #enteredKey < 3 then
+                    WindUI:Notify({ Title="Auth Error", Content="Key appears empty or malformed.", Icon="x-circle", Duration=4 })
+                    return
+                end
+
                 WindUI:Notify({ Title="Checking...", Content="Contacting Panda servers...", Icon="loader", Duration=2 })
                 local ok, result = pcall(function() return Cookies.validate(enteredKey) end)
-                if not ok then WindUI:Notify({ Title="Auth Error", Content="Validation call failed: "..tostring(result), Icon="wifi-off", Duration=5 }); return end
+                if not ok then
+                    WindUI:Notify({ Title="Auth Error", Content="Validation call failed: "..tostring(result), Icon="wifi-off", Duration=5 })
+                    return
+                end
+
                 local isSuccess, isPrem, expires = resolveResult(result)
                 if isSuccess then
+                    saveKeyToDisk(enteredKey)
                     applyPremium(isPrem, "KeySystem-Cookies", expires)
                     WindUI:Notify({ Title="✅ Key Valid", Content=(isPrem and "⭐ Premium" or "Free").." • Expires: "..expires, Icon="check-circle", Duration=5 })
                 else
-                    local reason = type(result)=="table" and tostring(result.error or result.message or result.reason or result.msg or "Invalid key") or "Invalid key"
+                    local reason = type(result)=="table"
+                        and tostring(result.error or result.message or result.reason or result.msg or "Invalid key")
+                        or "Invalid key"
                     WindUI:Notify({ Title="❌ "..reason, Content="Get a key at pandauth.com", Icon="x-circle", Duration=6 })
                 end
             end)
@@ -237,13 +362,8 @@ local MiscTab     = Window:Tab({ Title="Misc",     Icon="shield"  })
 
 -- ============================================================
 --  SAFE CFRAME HELPER
---  Builds a flat (no pitch/roll) CFrame at `pos` facing `dir`.
---  Uses CFrame.lookAt with a Y-locked target — no fromMatrix math,
---  no cross-product edge-cases, no flipping.
 -- ============================================================
 local function flatCFrame(pos, dir)
-    -- dir is already expected to be a flat XZ vector (Y ≈ 0)
-    -- Fallback to -Z if dir is degenerate
     local flatDir = Vector3.new(dir.X, 0, dir.Z)
     if flatDir.Magnitude < 0.001 then
         flatDir = Vector3.new(0, 0, -1)
@@ -272,8 +392,6 @@ local function createWeldedPlatform(padName, padSize)
     pad.CanTouch     = false
     pad.Parent       = workspace
 
-    -- Set CFrame BEFORE creating the weld so the weld bakes the
-    -- correct offset — this prevents the initial teleport-snap bug
     pad.CFrame = root.CFrame
 
     local weld = Instance.new("WeldConstraint")
@@ -303,7 +421,7 @@ local function groundY(worldX, worldY, worldZ, ignoreList)
 end
 
 -- ============================================================
---  FLY V1  (BodyVelocity — unchanged)
+--  FLY V1  (BodyVelocity)
 -- ============================================================
 do
     local FlySection = FlyTab:Section({ Title="Flight Control" })
@@ -370,16 +488,7 @@ do
 end
 
 -- ============================================================
---  FLY V2  — Weld-based platform flight (FIXED)
---
---  KEY FIXES vs original:
---  1. flatCFrame() replaces the unstable fromMatrix() calls.
---  2. Pad CFrame is seeded at root.CFrame (not a computed offset)
---     so the weld bakes a zero offset — player never snaps.
---  3. We drive the pad position by computing a NEW world position
---     each frame from the PREVIOUS pad position (+delta).
---     No accumulated floating-point drift.
---  4. Character respawn re-enables cleanly after a short wait.
+--  FLY V2  — Weld-based platform flight
 -- ============================================================
 do
     local FlyV2Section = FlyTab:Section({ Title="Fly V2  •  Weld-Based" })
@@ -390,9 +499,7 @@ do
     local fv2Conn    = nil
     local fv2Rig     = nil
 
-    -- Pad's authoritative world position (Y = pad centre, not top)
     local fv2PosX, fv2PosY, fv2PosZ = 0, 0, 0
-    -- Last stable facing direction (XZ, unit)
     local fv2FacingDir = Vector3.new(0, 0, -1)
 
     local function fv2GetRoot() local c=player.Character; return c and c:FindFirstChild("HumanoidRootPart") end
@@ -405,7 +512,6 @@ do
             destroyWeldedPlatform(fv2Rig)
             fv2Rig = nil
         end
-        -- safety sweep
         for _, obj in ipairs(workspace:GetChildren()) do
             if obj.Name == "_CBD_FlyV2Pad" then obj:Destroy() end
         end
@@ -420,9 +526,8 @@ do
         if not root then return end
         local hum = fv2GetHum()
 
-        -- Seed pad directly at root so weld offset = 0
         fv2PosX = root.Position.X
-        fv2PosY = root.Position.Y    -- pad centre at root centre; player stands on top via physics
+        fv2PosY = root.Position.Y
         fv2PosZ = root.Position.Z
 
         local lv = root.CFrame.LookVector
@@ -433,7 +538,6 @@ do
         fv2Rig = createWeldedPlatform("_CBD_FlyV2Pad", Vector3.new(10, 0.4, 10))
         if not fv2Rig then return end
 
-        -- Place pad exactly at root (weld was created here, so offset = identity)
         fv2Rig.pad.CFrame = flatCFrame(Vector3.new(fv2PosX, fv2PosY, fv2PosZ), fv2FacingDir)
 
         if hum then
@@ -451,7 +555,6 @@ do
 
             local cam = workspace.CurrentCamera
 
-            -- Input
             local wx, wz = 0, 0
             local goUp   = UserInputService:IsKeyDown(Enum.KeyCode.E)
             local goDown = UserInputService:IsKeyDown(Enum.KeyCode.Q)
@@ -468,7 +571,6 @@ do
                 local camFwdZ = cam.CFrame.LookVector.Z
                 local camRgtX = cam.CFrame.RightVector.X
                 local camRgtZ = cam.CFrame.RightVector.Z
-                -- Flatten and normalise camera axes
                 local fLen = math.sqrt(camFwdX*camFwdX + camFwdZ*camFwdZ)
                 local rLen = math.sqrt(camRgtX*camRgtX + camRgtZ*camRgtZ)
                 if fLen > 0.001 then camFwdX=camFwdX/fLen; camFwdZ=camFwdZ/fLen end
@@ -479,11 +581,9 @@ do
                 local wLen = math.sqrt(wx*wx + wz*wz)
                 if wLen > 0.001 then wx=wx/wLen; wz=wz/wLen end
 
-                -- Update facing
                 fv2FacingDir = Vector3.new(wx, 0, wz)
             end
 
-            -- Apply movement delta
             local speed = fv2Speed * dt
             fv2PosX = fv2PosX + wx * speed
             fv2PosZ = fv2PosZ + wz * speed
@@ -501,8 +601,8 @@ do
 
     player.CharacterAdded:Connect(function()
         if fv2Enabled then
-            fv2Enabled = false          -- prevent the loop running on a dead rig
-            task.wait(1)                -- wait for character to fully load
+            fv2Enabled = false
+            task.wait(1)
             fv2Enable()
         end
     end)
@@ -526,7 +626,7 @@ do
 end
 
 -- ============================================================
---  SPEED V1  (WalkSpeed — unchanged)
+--  SPEED V1  (WalkSpeed)
 -- ============================================================
 do
     local SpeedSection = SpeedTab:Section({ Title="Walk Speed" })
@@ -572,9 +672,6 @@ end
 
 -- ============================================================
 --  SPEED V2 (PREMIUM) — Weld-based platform speed
---
---  Ground snap: same pattern as noclip — cast straight down from
---  root, blacklist the character, set pad Y = hit.Y + hipOffset.
 -- ============================================================
 do
     local SpeedV2Section = SpeedTab:Section({ Title="Speed V2  •  👑 More Secure" })
@@ -584,7 +681,6 @@ do
     local v2Rig          = nil
     local v2WarningAcknowledged = false
 
-    -- Pad's authoritative world position
     local v2PosX, v2PosY, v2PosZ = 0, 0, 0
     local v2FacingDir = Vector3.new(0, 0, -1)
 
@@ -609,7 +705,6 @@ do
         local root = v2GetRoot()
         if not root then return end
 
-        -- Seed at root position
         v2PosX = root.Position.X
         v2PosY = root.Position.Y
         v2PosZ = root.Position.Z
@@ -637,7 +732,6 @@ do
 
             local cam = workspace.CurrentCamera
 
-            -- Input
             local mdX, mdZ = 0, 0
             if UserInputService:IsKeyDown(Enum.KeyCode.W) then mdZ = -1 end
             if UserInputService:IsKeyDown(Enum.KeyCode.S) then mdZ =  1 end
@@ -665,13 +759,9 @@ do
                 v2FacingDir = Vector3.new(moveX, 0, moveZ)
             end
 
-            -- Horizontal move
             v2PosX = v2PosX + moveX * v2Speed * dt
             v2PosZ = v2PosZ + moveZ * v2Speed * dt
 
-            -- ── Ground snap (same pattern as noclip) ─────────────
-            -- Cast straight down from root position, blacklist the
-            -- character. hit.Y + hipOffset = where the pad should sit.
             local root2 = v2GetRoot()
             if root2 then
                 local rp = RaycastParams.new()
