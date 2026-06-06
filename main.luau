@@ -1,4 +1,4 @@
--- fixed bugs AND ADDED DANCES
+-- fixed anims
 
 -- ==================== SERVICES ====================
 local Players          = game:GetService("Players")
@@ -56,6 +56,8 @@ end
 local modWatchToggle  = nil
 local antiFlingToggle = nil
 local v2SpeedToggle   = nil
+local animToggle      = nil   -- Animations enable toggle (premium)
+local animDropdown    = nil   -- Animations picker dropdown (premium)
 local Window          = nil
 
 -- ============================================================
@@ -130,6 +132,8 @@ local function applyPremium(value, source, expires)
     if modWatchToggle  then pcall(function() if isPremium then modWatchToggle:Unlock()  else modWatchToggle:Lock()  end end) end
     if antiFlingToggle then pcall(function() if isPremium then antiFlingToggle:Unlock() else antiFlingToggle:Lock() end end) end
     if v2SpeedToggle   then pcall(function() if isPremium then v2SpeedToggle:Unlock()   else v2SpeedToggle:Lock()   end end) end
+    if animToggle      then pcall(function() if isPremium then animToggle:Unlock()      else animToggle:Lock()      end end) end
+    if animDropdown    then pcall(function() if isPremium then animDropdown:Unlock()    else animDropdown:Lock()    end end) end
     if isPremium then
         WindUI:Notify({ Title="⭐ Premium Active", Content="Premium features unlocked! Expires: "..keyExpiry, Icon="crown", Duration=6 })
     end
@@ -1687,8 +1691,8 @@ do
     end
 
     -- ── UI ──────────────────────────────────────────────────────
-    -- Enable toggle (premium-locked)
-    local animToggle = AnimSection:Toggle({
+    -- Enable toggle (premium-locked) — assigned to outer forward-declared var
+    animToggle = AnimSection:Toggle({
         Title   = "👑 Enable Animations",
         Desc    = "Play dance animations visible to everyone in the server.",
         Value   = false,
@@ -1708,8 +1712,8 @@ do
         end,
     })
 
-    -- Animation picker dropdown
-    AnimSection:Dropdown({
+    -- Animation picker dropdown — assigned to outer forward-declared var
+    animDropdown = AnimSection:Dropdown({
         Title   = "👑 Pick Animation",
         Desc    = "Select an animation to play. Visible to all players.",
         List    = dropdownOptions,
