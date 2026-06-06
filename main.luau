@@ -1,4 +1,4 @@
--- fixed bugs
+-- fixed bugs AND ADDED DANCES
 
 -- ==================== SERVICES ====================
 local Players          = game:GetService("Players")
@@ -915,17 +915,18 @@ do
 end
 
 -- ============================================================
---  TROLLING – Proximity Fling (FIXED — does not fling yourself)
+--  TROLLING – Proximity Fling (SkidFling method — actually works)
 --
---  HOW IT WORKS NOW:
---  Instead of putting a BodyVelocity on OUR root and teleporting
---  into the target (which was what caused self-fling), we instead:
---    1. Set immunity flag so anti-fling ignores us entirely.
---    2. Create a temporary anchored BodyVelocity on the TARGET'S
---       HumanoidRootPart directly with a large upward + directional
---       force, which launches them without touching us at all.
---    3. After a short burst, clean up the force and our immunity.
---  This means YOUR position is never moved or affected.
+--  LocalScript physics only affect your OWN character on the server.
+--  To fling another player you must physically move YOUR root into
+--  theirs with high velocity attached — this transfers momentum to
+--  them via Roblox's physics engine (the original skid-fling method).
+--
+--  To prevent self-fling we:
+--    1. Raise _CBD_SelfImmune the entire time so anti-fling ignores us.
+--    2. Save our CFrame before starting and do a clean zero + teleport
+--       back immediately after the BV is removed.
+--    3. Use a tight time-limit (1.5s max) so we never stay flung.
 -- ============================================================
 do
     local TrollingSection = TrollingTab:Section({ Title="Fling" })
@@ -936,80 +937,114 @@ do
     local FLING_RANGE     = 5
     local FLING_COOLDOWN  = 4
 
-    -- Named tag we put on force objects so anti-fling can ignore them on its side
-    local CBD_FLING_TAG = "_CBD_Fling_BV"
-
     local function getRoot(char) return char and char:FindFirstChild("HumanoidRootPart") end
     local function getHum(char)  return char and char:FindFirstChildOfClass("Humanoid") end
 
     local activeFlings = {}
 
-    local function launchTarget(target)
+    local function skidFlingTarget(target)
         if activeFlings[target.UserId] then return end
         activeFlings[target.UserId] = true
 
         task.spawn(function()
-            -- Set self-immunity so anti-fling doesn't misfire on any incidental
-            -- velocity that occurs when we get close to the target
+            -- Raise immunity FIRST — anti-fling will ignore us the whole time
             _CBD_SelfImmune = true
 
             local myChar = player.Character
+            local myHum  = getHum(myChar)
             local myRoot = getRoot(myChar)
-            if not myChar or not myRoot then
+            if not myChar or not myHum or not myRoot then
                 _CBD_SelfImmune = false
                 activeFlings[target.UserId] = nil
                 return
             end
 
             local tChar = target.Character
-            local tRoot = getRoot(tChar)
-            local tHum  = getHum(tChar)
-            if not tChar or not tRoot or not tHum then
+            local tHum  = tChar and getHum(tChar)
+            local tRoot = tChar and getRoot(tChar)
+            if not tChar or not tHum or not tRoot then
                 _CBD_SelfImmune = false
                 activeFlings[target.UserId] = nil
                 return
             end
 
-            -- Direction from us to them for the horizontal component
-            local dir = (tRoot.Position - myRoot.Position)
-            local flatDir = Vector3.new(dir.X, 0, dir.Z)
-            if flatDir.Magnitude < 0.001 then flatDir = Vector3.new(0, 0, 1) end
-            flatDir = flatDir.Unit
+            -- Snapshot our safe return position before anything moves
+            local returnCF = myRoot.CFrame
 
-            -- Apply a powerful BodyVelocity directly to the target's root
-            -- We do NOT touch our own root at all
+            -- Prevent FallenPartsDestroyHeight from deleting the target
+            local origFPDH = workspace.FallenPartsDestroyHeight
+            workspace.FallenPartsDestroyHeight = math.huge
+
+            -- Attach BodyVelocity to OUR root — this powers the momentum transfer
             local bv = Instance.new("BodyVelocity")
-            bv.Name     = CBD_FLING_TAG
+            bv.Name     = "AirResistance"   -- whitelisted by anti-fling
             bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-            -- Horizontal launch + a big upward kick
-            bv.Velocity = flatDir * 300 + Vector3.new(0, 250, 0)
-            bv.P        = math.huge
-            bv.Parent   = tRoot
+            bv.Velocity  = Vector3.new(9e8, 9e8, 9e8)
+            bv.Parent   = myRoot
 
-            -- Also zero the target's angular velocity so they spin naturally
-            tRoot.AssemblyAngularVelocity = Vector3.new(
-                math.random(-20, 20),
-                math.random(-20, 20),
-                math.random(-20, 20)
-            )
+            myHum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
 
-            -- Hold for a short burst then remove
-            task.wait(0.12)
+            -- Oscillate into the target to transfer momentum via contact physics
+            local TIME_LIMIT = 1.5
+            local startTick  = tick()
+            local angle      = 0
 
+            local function fpos(base, offset, ang)
+                myRoot.CFrame    = CFrame.new(base.Position) * offset * ang
+                myRoot.Velocity          = Vector3.new(9e7, 9e7 * 10, 9e7)
+                myRoot.RotVelocity       = Vector3.new(9e8, 9e8, 9e8)
+            end
+
+            repeat
+                if not myRoot or not myRoot.Parent then break end
+                if not tRoot  or not tRoot.Parent  then break end
+                angle += 100
+                local vel = tRoot.Velocity.Magnitude
+                if vel < 50 then
+                    fpos(tRoot, CFrame.new(0,  1.5, 0) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
+                    fpos(tRoot, CFrame.new(0, -1.5, 0) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
+                    fpos(tRoot, CFrame.new( 2.25,  1.5, -2.25) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
+                    fpos(tRoot, CFrame.new(-2.25, -1.5,  2.25) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
+                else
+                    fpos(tRoot, CFrame.new(0,  1.5,  tHum.WalkSpeed),                      CFrame.Angles(math.rad(90), 0, 0)); task.wait()
+                    fpos(tRoot, CFrame.new(0, -1.5, -tHum.WalkSpeed),                      CFrame.Angles(0, 0, 0));             task.wait()
+                    fpos(tRoot, CFrame.new(0,  1.5,  tRoot.Velocity.Magnitude / 1.25),     CFrame.Angles(math.rad(90), 0, 0)); task.wait()
+                    fpos(tRoot, CFrame.new(0, -1.5, -tRoot.Velocity.Magnitude / 1.25),     CFrame.Angles(0, 0, 0));             task.wait()
+                end
+            until tRoot.Velocity.Magnitude > 500
+                or tRoot.Parent ~= tChar
+                or target.Parent ~= Players
+                or tHum.Sit
+                or myHum.Health <= 0
+                or tick() > startTick + TIME_LIMIT
+
+            -- Remove the BV immediately
             pcall(function() bv:Destroy() end)
+            myHum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+            workspace.CurrentCamera.CameraSubject = myHum
 
-            -- Wait a moment for the flung state to settle before lifting immunity
-            task.wait(0.3)
+            -- Clean snap back: zero ALL velocity on every limb, then teleport
+            if myChar then
+                for _, part in ipairs(myChar:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        part.AssemblyLinearVelocity  = Vector3.zero
+                        part.AssemblyAngularVelocity = Vector3.zero
+                    end
+                end
+            end
+            if myRoot and myRoot.Parent then
+                myRoot.CFrame = returnCF * CFrame.new(0, 0.5, 0)
+            end
+            pcall(function() myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
 
+            workspace.FallenPartsDestroyHeight = origFPDH
+
+            -- Small grace window then lift immunity
+            task.wait(0.25)
             _CBD_SelfImmune = false
             activeFlings[target.UserId] = nil
 
-            WindUI:Notify({
-                Title  = "Fling",
-                Content= target.Name .. " was flung!",
-                Icon   = "zap",
-                Duration = 2,
-            })
+            WindUI:Notify({ Title="Fling", Content=target.Name.." was flung!", Icon="zap", Duration=2 })
         end)
     end
 
@@ -1031,7 +1066,7 @@ do
                     local last = flingCooldowns[target.UserId]
                     if not last or (now - last) >= FLING_COOLDOWN then
                         flingCooldowns[target.UserId] = now
-                        launchTarget(target)
+                        skidFlingTarget(target)
                     end
                 end
             end
@@ -1039,7 +1074,7 @@ do
     end
 
     local function stopFlingDetection()
-        flingEnabled  = false
+        flingEnabled    = false
         _CBD_SelfImmune = false
         if flingConn then flingConn:Disconnect(); flingConn = nil end
         flingCooldowns = {}
@@ -1049,7 +1084,7 @@ do
     local flingToggleRef = nil
     flingToggleRef = TrollingSection:Toggle({
         Title="Proximity Fling",
-        Desc="Walk into a player to launch them with high velocity. Does NOT affect your own character.",
+        Desc="Walk into a player to launch them. Teleports you back cleanly after each fling.",
         Value=false,
         Callback=function(state)
             if state then
@@ -1384,6 +1419,377 @@ do
         Desc="Minimum seconds between fling-detected notifications",
         Step=1, Value={Min=1, Max=10, Default=2},
         Callback=function(v) NOTIFY_COOLDOWN=v end
+    })
+end
+
+-- ============================================================
+--  MISC – Animations (PREMIUM)
+--
+--  Logic extracted from Zaya's Animation Gui.
+--  Uses LoadAnimation on the local Humanoid — animations play
+--  visibly to everyone in the server (replicated by Roblox).
+--  No external GUI is created; everything lives in WindUI Misc tab.
+-- ============================================================
+do
+    local AnimSection     = MiscTab:Section({ Title="Animations  •  👑 Premium" })
+
+    -- ── Animation list ──────────────────────────────────────────
+    -- Each entry: { id = number, name = string }
+    -- Add more rows here any time — the dropdown rebuilds itself.
+    local ANIMATION_LIST = {
+        { id=10714390497,      name="Robot Dance"          },
+        { id=10713962506,      name="Floss"                },
+        { id=14899979575,      name="Griddy"               },
+        { id=16572740012,      name="GTA Victory"          },
+        { id=18443237526,      name="Shoot Dance"          },
+        { id=15679621440,      name="Renegade"             },
+        { id=4940563117,       name="Nae Nae"              },
+        { id=14352362059,      name="Thriller"             },
+        { id=18665811005,      name="Woah"                 },
+        { id=10714360343,      name="Orange Justice"       },
+        { id=10214319518,      name="Dab"                  },
+        { id=15963314052,      name="Sussy Walk"           },
+        { id=10714016223,      name="Wiggle"               },
+        { id=11309255148,      name="JuJu"                 },
+        { id=16126469463,      name="Samba"                },
+        { id=15505459811,      name="Carlton"              },
+        { id=16256203246,      name="Moonwalk"             },
+        { id=10714378156,      name="Wave"                 },
+        { id=10370362157,      name="Worm"                 },
+        { id=15122972413,      name="Running Man"          },
+        { id=18524313628,      name="Hit Dem Folks"        },
+        { id=12507085924,      name="Gangnam Style"        },
+        { id=10714330764,      name="Twerk"                },
+        { id=11444441914,      name="Milly Rock"           },
+        { id=17748314784,      name="Crip Walk"            },
+        { id=10713954623,      name="John Travolta"        },
+        { id=18526288497,      name="Turbo"                },
+        { id=10714345862,      name="Shuffle"              },
+        { id=10214311282,      name="Salute"               },
+        { id=10714336041,      name="Happy"                },
+        { id=17360699557,      name="Electro Shuffle"      },
+        { id=17000021306,      name="Anime Dance"          },
+        { id=14352343065,      name="Macarena"             },
+        { id=10714342957,      name="Whip"                 },
+        { id=10714388352,      name="Dances"               },
+        { id=16584481352,      name="Cat Walk"             },
+        { id=12992262118,      name="Herobrine"            },
+        { id=10714392151,      name="Raise the Roof"       },
+        { id=11753474067,      name="Hype"                 },
+        { id=10717116749,      name="Pony"                 },
+        { id=14899980745,      name="Disco Fever"          },
+        { id=15698402762,      name="Sig Sauer"            },
+        { id=10714068222,      name="Swing"                },
+        { id=15609995579,      name="Uno Reverse"          },
+        { id=10714101749,      name="Breakdance"           },
+        { id=14352337694,      name="Twist"                },
+        { id=5895324424,       name="Sprinkler"            },
+        { id=10713981723,      name="Slide"                },
+        { id=10478338114,      name="Spin"                 },
+        { id=16553163212,      name="Ymca"                 },
+        { id=15571453761,      name="Pop Lock"             },
+        { id=10714366910,      name="Lasso"                },
+        { id=10714375667,      name="Whip Nae Nae"         },
+        { id=10714100539,      name="Running Man 2"        },
+        { id=10714374267,      name="Tootsee Roll"         },
+        { id=10714372526,      name="Cabbage Patch"        },
+        { id=15698404340,      name="Reload"               },
+        { id=14352340648,      name="Charleston"           },
+        { id=12507084541,      name="Bankroll"             },
+        { id=15392752812,      name="Bop"                  },
+        { id=15505456446,      name="Cha Cha Slide"        },
+        { id=10714352930,      name="Bounce"               },
+        { id=10714065135,      name="Squat Kick"           },
+        { id=10713990381,      name="Dip"                  },
+        { id=10714349037,      name="Jump"                 },
+        { id=16646423316,      name="Knife Party"          },
+        { id=15517864808,      name="Dab Walk"             },
+        { id=15693621070,      name="Get Freaky"           },
+        { id=15689279687,      name="Disco"                },
+        { id=17746180844,      name="Skibidi"              },
+        { id=11394033602,      name="Pon Pon"              },
+        { id=10714345459,      name="Crank"                },
+        { id=10714386947,      name="Hit Dem"              },
+        { id=10714352626,      name="Dances 2"             },
+        { id=10714395175,      name="Robot 2"              },
+        { id=10713983178,      name="Crocodile"            },
+        { id=10714347453,      name="Step"                 },
+        { id=10714389396,      name="Spin Kick"            },
+        { id=10214314957,      name="Point"                },
+        { id=15549124879,      name="Mannequin"            },
+        { id=10714340543,      name="Old Spice"            },
+        { id=10714369325,      name="Swag"                 },
+        { id=10714069471,      name="Lean"                 },
+        { id=14022936101,      name="Street Dance"         },
+        { id=16392075853,      name="Sway"                 },
+        { id=10714089137,      name="Anime Dance 2"        },
+        { id=14024642130,      name="Drill"                },
+        { id=10714362852,      name="Shimmy"               },
+        { id=10714003221,      name="Idle Bounce"          },
+        { id=10714360164,      name="Cheer"                },
+        { id=16270690701,      name="Fancy Footwork"       },
+        { id=10370346995,      name="Trot"                 },
+        { id=6862001787,       name="Blox Step"            },
+        { id=10370351535,      name="March"                },
+        { id=18148804340,      name="Cyber"                },
+        { id=15392756794,      name="Pop"                  },
+        { id=15689278184,      name="Shoot"                },
+        { id=10714061912,      name="Clap"                 },
+        { id=10714293450,      name="Shrug"                },
+        { id=10713984554,      name="Arms Cross"           },
+        { id=10713957138,      name="Bow"                  },
+        { id=10714382225,      name="Salsa"                },
+        { id=10714072822,      name="Head Bang"            },
+        { id=10714340558,      name="Guitar"               },
+        { id=10714393929,      name="Air Guitar"           },
+        { id=10713968716,      name="Sit"                  },
+        { id=10714074218,      name="Lean Back"            },
+        { id=10714347256,      name="Pushup"               },
+        { id=16272432203,      name="Power Up"             },
+        { id=10714358528,      name="Sleep"                },
+        { id=10713992055,      name="Laugh"                },
+        { id=10714394082,      name="Cry"                  },
+        { id=10714392953,      name="Confused"             },
+        { id=10714391240,      name="Think"                },
+        { id=10714383856,      name="Sigh"                 },
+        { id=16215030041,      name="Taunt"                },
+        { id=15392759696,      name="Victory"              },
+        { id=12507083048,      name="Thumbs Up"            },
+        { id=12259826609,      name="Thumbs Down"          },
+        { id=16302968986,      name="OK Sign"              },
+        { id=4940561610,       name="Peace"                },
+        { id=15517862739,      name="Flex"                 },
+        { id=10214317325,      name="Facepalm"             },
+        { id=10275008655,      name="Shiver"               },
+        { id=10714371274,      name="Cringe"               },
+        { id=10713988674,      name="Nervous"              },
+        { id=10714066964,      name="Shocked"              },
+        { id=12259825026,      name="Angry"                },
+        { id=11453082181,      name="Scared"               },
+        { id=10714350889,      name="Dizzy"                },
+        { id=10370353969,      name="Tired"                },
+        { id=18225053113,      name="Yawn"                 },
+        { id=13823324057,      name="Sneeze"               },
+        { id=11444443576,      name="Cough"                },
+        { id=10714392876,      name="Idle Lean"            },
+        { id=10714164866,      name="Idle Scratch"         },
+        { id=10714382522,      name="Idle Look"            },
+        { id=10714349738,      name="Idle Stretch"         },
+        { id=17370775305,      name="Idle Tap"             },
+        { id=10714076981,      name="Idle Whistle"         },
+        { id=10714365721,      name="Idle Hum"             },
+        { id=15505454268,      name="Idle Clap"            },
+        { id=15505458452,      name="Idle Rock"            },
+        { id=10714361543,      name="Idle Pose"            },
+        { id=10714364213,      name="Idle Freeze"          },
+        { id=10714022275,      name="Idle Look Around"     },
+        { id=10714174918,      name="Idle Sway"            },
+        { id=12804157977,      name="Idle Bored"           },
+        { id=10714063823,      name="Idle Fidget"          },
+        { id=10714070681,      name="Idle Check Watch"     },
+        { id=14352335202,      name="Phone"                },
+        { id=10714380563,      name="Type"                 },
+        { id=18526362841,      name="Read"                 },
+        { id=10714403700,      name="Cook"                 },
+        { id=10714377090,      name="Eat"                  },
+        { id=10714168145,      name="Drink"                },
+        { id=10714389988,      name="Drive"                },
+        { id=10714338461,      name="Rowing"               },
+        { id=10713966026,      name="Swim"                 },
+        { id=10714395441,      name="Run Alt"              },
+        { id=10714374484,      name="Walk Alt"             },
+        { id=10714359093,      name="Jump Alt"             },
+        { id=10714356920,      name="Fall Alt"             },
+    }
+
+    -- ── State ───────────────────────────────────────────────────
+    local animEnabled      = false
+    local currentTrack     = nil   -- active AnimationTrack
+    local currentAnimId    = nil   -- currently selected id (number)
+    local animSpeed        = 1
+    local animLooped       = true
+    local animSpeedConn    = nil   -- RunService conn for live speed sync
+
+    -- ── Helpers ─────────────────────────────────────────────────
+    local function getHum()
+        local c = player.Character
+        return c and c:FindFirstChildOfClass("Humanoid")
+    end
+
+    local function stopAnimation()
+        if currentTrack then
+            pcall(function() currentTrack:Stop() end)
+            pcall(function() currentTrack:Destroy() end)
+            currentTrack = nil
+        end
+        if animSpeedConn then animSpeedConn:Disconnect(); animSpeedConn = nil end
+    end
+
+    -- Stop all playing tracks on the humanoid (like the original "Stop" button)
+    local function stopAllAnimations()
+        local hum = getHum()
+        if not hum then return end
+        stopAnimation()
+        for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+            pcall(function() track:Stop() end)
+        end
+        WindUI:Notify({ Title="Animations", Content="All animations stopped.", Icon="square", Duration=2 })
+    end
+
+    local function playAnimation(id)
+        if not isPremium then return end
+        local hum = getHum()
+        if not hum then
+            WindUI:Notify({ Title="Animations", Content="No humanoid found.", Icon="alert-circle", Duration=3 })
+            return
+        end
+        stopAnimation()
+        currentAnimId = id
+        local anim = Instance.new("Animation")
+        anim.AnimationId = "rbxassetid://" .. tostring(id)
+        local ok, track = pcall(function() return hum:LoadAnimation(anim) end)
+        anim:Destroy()
+        if not ok or not track then
+            WindUI:Notify({ Title="Animations", Content="Failed to load animation "..id, Icon="alert-circle", Duration=3 })
+            return
+        end
+        currentTrack        = track
+        currentTrack.Looped = animLooped
+        currentTrack:Play()
+        currentTrack:AdjustSpeed(animSpeed)
+        -- Keep speed synced while the track plays
+        animSpeedConn = RunService.Heartbeat:Connect(function()
+            if currentTrack and currentTrack.IsPlaying then
+                pcall(function() currentTrack:AdjustSpeed(animSpeed) end)
+            end
+        end)
+    end
+
+    -- Reattach after respawn
+    player.CharacterAdded:Connect(function()
+        currentTrack  = nil
+        animSpeedConn = nil
+        if animEnabled and currentAnimId then
+            task.wait(1)
+            playAnimation(currentAnimId)
+        end
+    end)
+
+    -- ── Build dropdown options ───────────────────────────────────
+    local dropdownOptions = {}
+    for _, entry in ipairs(ANIMATION_LIST) do
+        table.insert(dropdownOptions, entry.name)
+    end
+    -- Map name → id for quick lookup
+    local nameToId = {}
+    for _, entry in ipairs(ANIMATION_LIST) do
+        nameToId[entry.name] = entry.id
+    end
+
+    -- ── UI ──────────────────────────────────────────────────────
+    -- Enable toggle (premium-locked)
+    local animToggle = AnimSection:Toggle({
+        Title   = "👑 Enable Animations",
+        Desc    = "Play dance animations visible to everyone in the server.",
+        Value   = false,
+        Locked  = true,
+        LockedTitle = "Upgrade to Premium at pandauth.com to access Animations.",
+        Callback = function(state)
+            if not isPremium then
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                return
+            end
+            animEnabled = state
+            if not state then
+                stopAllAnimations()
+            else
+                WindUI:Notify({ Title="Animations", Content="Pick an animation from the dropdown below.", Icon="music", Duration=3 })
+            end
+        end,
+    })
+
+    -- Animation picker dropdown
+    AnimSection:Dropdown({
+        Title   = "👑 Pick Animation",
+        Desc    = "Select an animation to play. Visible to all players.",
+        List    = dropdownOptions,
+        Locked  = true,
+        LockedTitle = "Upgrade to Premium at pandauth.com.",
+        Callback = function(selected)
+            if not isPremium then
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                return
+            end
+            if not animEnabled then
+                WindUI:Notify({ Title="Animations", Content="Enable animations first using the toggle above.", Icon="alert-circle", Duration=3 })
+                return
+            end
+            local id = nameToId[selected]
+            if not id then return end
+            playAnimation(id)
+            WindUI:Notify({ Title="▶ Playing", Content=selected, Icon="music", Duration=2 })
+        end,
+    })
+
+    -- Loop toggle
+    AnimSection:Toggle({
+        Title   = "Loop Animation",
+        Desc    = "Whether the animation repeats automatically.",
+        Value   = true,
+        Callback = function(state)
+            animLooped = state
+            if currentTrack then
+                pcall(function() currentTrack.Looped = state end)
+            end
+        end,
+    })
+
+    -- Speed slider
+    AnimSection:Slider({
+        Title = "Animation Speed",
+        Desc  = "Playback speed multiplier (1 = normal).",
+        Step  = 0.1,
+        Value = { Min=0.1, Max=5, Default=1 },
+        Callback = function(v)
+            animSpeed = v
+            if currentTrack and currentTrack.IsPlaying then
+                pcall(function() currentTrack:AdjustSpeed(animSpeed) end)
+            end
+        end,
+    })
+
+    -- Stop button
+    AnimSection:Button({
+        Title = "Stop All Animations",
+        Desc  = "Immediately stops every playing animation.",
+        Icon  = "square",
+        Callback = function()
+            stopAllAnimations()
+        end,
+    })
+
+    -- Custom ID input
+    AnimSection:Input({
+        Title       = "Custom Animation ID",
+        Desc        = "Enter any Roblox animation asset ID to play it.",
+        Placeholder = "e.g. 507770239",
+        Callback    = function(text)
+            if not isPremium then
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                return
+            end
+            if not animEnabled then
+                WindUI:Notify({ Title="Animations", Content="Enable animations first.", Icon="alert-circle", Duration=3 })
+                return
+            end
+            local id = tonumber(text)
+            if not id then
+                WindUI:Notify({ Title="Animations", Content="Invalid ID — numbers only.", Icon="x-circle", Duration=3 })
+                return
+            end
+            playAnimation(id)
+            WindUI:Notify({ Title="▶ Custom", Content="Playing ID "..id, Icon="music", Duration=2 })
+        end,
     })
 end
 
