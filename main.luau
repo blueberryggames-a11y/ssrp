@@ -924,71 +924,192 @@ do
 end
 
 -- ============================================================
---  TROLLING – Proximity Fling
+--  TROLLING – Proximity Fling (SkidFling Method)
 -- ============================================================
 do
-    local TrollingSection=TrollingTab:Section({ Title="Fling" })
-    local flingEnabled=false; local flingConn=nil; local flingCooldowns={}; local activeFlings={}; local flingWarningAcknowledged=false
-    local FLING_RANGE=4; local FLING_HEIGHT=120; local FLING_STEPS=12; local FLING_COOLDOWN=3
+    local TrollingSection = TrollingTab:Section({ Title="Fling" })
+    local flingEnabled    = false
+    local flingConn       = nil
+    local flingCooldowns  = {}
+    local activeFlings    = {}
+    local flingWarningAcknowledged = false
+    local FLING_RANGE     = 5
+    local FLING_COOLDOWN  = 4
 
     local function getRoot(char) return char and char:FindFirstChild("HumanoidRootPart") end
-    local function flingTarget(target)
+    local function getHum(char)  return char and char:FindFirstChildOfClass("Humanoid") end
+
+    local function skidFlingTarget(target)
         if activeFlings[target.UserId] then return end
-        local myChar=player.Character; local myRoot=getRoot(myChar); if not myRoot then return end
-        local targetChar=target.Character; local targetRoot=getRoot(targetChar); if not targetRoot then return end
-        local dir=targetRoot.Position-myRoot.Position; dir=Vector3.new(dir.X,0,dir.Z)
-        if dir.Magnitude<0.01 then dir=myRoot.CFrame.LookVector end; dir=dir.Unit
-        activeFlings[target.UserId]=true
+        activeFlings[target.UserId] = true
+
         task.spawn(function()
-            local startPos=targetRoot.Position
-            for i=1,FLING_STEPS do
-                if not targetRoot or not targetRoot.Parent then break end; if not flingEnabled then break end
-                local t=i/FLING_STEPS; local height=math.sin(t*math.pi)*FLING_HEIGHT; local forward=dir*(t*20)
-                local newPos=startPos+forward+Vector3.new(0,height,0); local currentCF=targetRoot.CFrame
-                targetRoot.CFrame=CFrame.new(newPos)*(currentCF-currentCF.Position); task.wait(0.02)
-            end; activeFlings[target.UserId]=nil
+            local myChar = player.Character
+            local myHum  = getHum(myChar)
+            local myRoot = getRoot(myChar)
+            if not myChar or not myHum or not myRoot then
+                activeFlings[target.UserId] = nil; return
+            end
+
+            local tChar = target.Character
+            local tHum  = tChar and getHum(tChar)
+            local tRoot = tChar and getRoot(tChar)
+            if not tChar or not tHum or not tRoot then
+                activeFlings[target.UserId] = nil; return
+            end
+
+            -- Save our return position
+            local oldPos = myRoot.CFrame
+
+            -- Temporarily set FallenPartsDestroyHeight to prevent target vanishing
+            local origFPDH = workspace.FallenPartsDestroyHeight
+            workspace.FallenPartsDestroyHeight = math.huge
+
+            -- Attach BodyVelocity to OUR root to power the fling
+            local bv = Instance.new("BodyVelocity")
+            bv.Name     = "FlingBV"
+            bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+            bv.Velocity  = Vector3.new(9e8, 9e8, 9e8)
+            bv.Parent   = myRoot
+
+            myHum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+
+            -- Oscillate our CFrame into the target to transfer momentum
+            local TimeLimit = 2
+            local startTick = tick()
+            local angle     = 0
+
+            local function fpos(basePart, offset, ang)
+                myRoot.CFrame = CFrame.new(basePart.Position) * offset * ang
+                myRoot.Velocity    = Vector3.new(9e7, 9e7 * 10, 9e7)
+                myRoot.RotVelocity = Vector3.new(9e8, 9e8, 9e8)
+            end
+
+            repeat
+                if not myRoot or not myRoot.Parent then break end
+                if not tRoot  or not tRoot.Parent  then break end
+                local vel = tRoot.Velocity.Magnitude
+
+                angle = angle + 100
+
+                if vel < 50 then
+                    fpos(tRoot, CFrame.new(0,  1.5, 0) + tHum.MoveDirection * math.max(vel/1.25,0), CFrame.Angles(math.rad(angle),0,0)); task.wait()
+                    fpos(tRoot, CFrame.new(0, -1.5, 0) + tHum.MoveDirection * math.max(vel/1.25,0), CFrame.Angles(math.rad(angle),0,0)); task.wait()
+                    fpos(tRoot, CFrame.new(2.25, 1.5,-2.25)+tHum.MoveDirection*math.max(vel/1.25,0), CFrame.Angles(math.rad(angle),0,0)); task.wait()
+                    fpos(tRoot, CFrame.new(-2.25,-1.5, 2.25)+tHum.MoveDirection*math.max(vel/1.25,0), CFrame.Angles(math.rad(angle),0,0)); task.wait()
+                else
+                    fpos(tRoot, CFrame.new(0, 1.5,  tHum.WalkSpeed), CFrame.Angles(math.rad(90),0,0)); task.wait()
+                    fpos(tRoot, CFrame.new(0,-1.5, -tHum.WalkSpeed), CFrame.Angles(0,0,0));             task.wait()
+                    fpos(tRoot, CFrame.new(0, 1.5,  tRoot.Velocity.Magnitude/1.25), CFrame.Angles(math.rad(90),0,0)); task.wait()
+                    fpos(tRoot, CFrame.new(0,-1.5, -tRoot.Velocity.Magnitude/1.25), CFrame.Angles(0,0,0)); task.wait()
+                end
+            until tRoot.Velocity.Magnitude > 500
+                or tRoot.Parent ~= tChar
+                or target.Parent ~= Players
+                or tHum.Sit
+                or myHum.Health <= 0
+                or tick() > startTick + TimeLimit
+
+            -- Cleanup BV
+            bv:Destroy()
+            myHum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+            workspace.CurrentCamera.CameraSubject = myHum
+
+            -- Snap ourselves back to where we were
+            local returnAttempts = 0
+            repeat
+                returnAttempts += 1
+                myRoot.CFrame = oldPos * CFrame.new(0, 0.5, 0)
+                myHum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                for _, part in ipairs(myChar:GetChildren()) do
+                    if part:IsA("BasePart") then
+                        part.AssemblyLinearVelocity  = Vector3.zero
+                        part.AssemblyAngularVelocity = Vector3.zero
+                    end
+                end
+                task.wait()
+            until (myRoot.Position - oldPos.Position).Magnitude < 25 or returnAttempts > 60
+
+            workspace.FallenPartsDestroyHeight = origFPDH
+            activeFlings[target.UserId] = nil
+
+            WindUI:Notify({ Title="Fling", Content=target.Name.." was flung!", Icon="zap", Duration=2 })
         end)
-        WindUI:Notify({ Title="Fling", Content=target.Name.." was flung!", Icon="zap", Duration=2 })
     end
+
     local function startFlingDetection()
-        if flingConn then flingConn:Disconnect(); flingConn=nil end
-        flingConn=RunService.Heartbeat:Connect(function()
+        if flingConn then flingConn:Disconnect(); flingConn = nil end
+        flingConn = RunService.Heartbeat:Connect(function()
             if not flingEnabled then return end
-            local myChar=player.Character; local myRoot=getRoot(myChar); if not myRoot then return end
-            local now=tick()
-            for _,target in ipairs(Players:GetPlayers()) do
-                if target==player then continue end
-                local tChar=target.Character; local tRoot=getRoot(tChar); if not tRoot then continue end
-                local dist=(myRoot.Position-tRoot.Position).Magnitude
-                if dist<=FLING_RANGE then
-                    local last=flingCooldowns[target.UserId]
-                    if not last or (now-last)>=FLING_COOLDOWN then flingCooldowns[target.UserId]=now; flingTarget(target) end
+            local myChar = player.Character
+            local myRoot = getRoot(myChar)
+            if not myRoot then return end
+            local now = tick()
+            for _, target in ipairs(Players:GetPlayers()) do
+                if target == player then continue end
+                local tChar = target.Character
+                local tRoot = getRoot(tChar)
+                if not tRoot then continue end
+                local dist = (myRoot.Position - tRoot.Position).Magnitude
+                if dist <= FLING_RANGE then
+                    local last = flingCooldowns[target.UserId]
+                    if not last or (now - last) >= FLING_COOLDOWN then
+                        flingCooldowns[target.UserId] = now
+                        skidFlingTarget(target)
+                    end
                 end
             end
         end)
     end
-    local function stopFlingDetection() flingEnabled=false; if flingConn then flingConn:Disconnect(); flingConn=nil end; flingCooldowns={}; activeFlings={} end
 
-    local flingToggleRef=nil
-    flingToggleRef=TrollingSection:Toggle({
-        Title="Proximity Fling", Desc="Walk into a player to fling them via CFrame arc.", Value=false,
+    local function stopFlingDetection()
+        flingEnabled = false
+        if flingConn then flingConn:Disconnect(); flingConn = nil end
+        flingCooldowns = {}
+        activeFlings   = {}
+    end
+
+    local flingToggleRef = nil
+    flingToggleRef = TrollingSection:Toggle({
+        Title="Proximity Fling",
+        Desc="Walk into a player to launch them with high velocity.",
+        Value=false,
         Callback=function(state)
             if state then
                 if not flingWarningAcknowledged then
-                    if flingToggleRef then pcall(function() flingToggleRef:Set(false) end) end; flingWarningAcknowledged=true
-                    WindUI:Popup({ Title="⚠️ Fling Warning", Icon="alert-triangle", Content="Proximity Fling affects other players and may violate game rules, resulting in a kick or ban. Use responsibly and at your own risk.",
+                    if flingToggleRef then pcall(function() flingToggleRef:Set(false) end) end
+                    flingWarningAcknowledged = true
+                    WindUI:Popup({
+                        Title="⚠️ Fling Warning", Icon="alert-triangle",
+                        Content="Proximity Fling affects other players and may violate game rules, resulting in a kick or ban. Use responsibly and at your own risk.",
                         Buttons={
-                            { Title="Cancel", Variant="Tertiary", Callback=function() flingWarningAcknowledged=false; flingEnabled=false; WindUI:Notify({ Title="Fling", Content="Fling cancelled.", Icon="x-circle", Duration=2 }) end },
-                            { Title="I Understand", Icon="check", Variant="Primary", Callback=function() flingEnabled=true; if flingToggleRef then pcall(function() flingToggleRef:Set(true) end) end; startFlingDetection(); WindUI:Notify({ Title="Fling", Content="Walk into players to fling them!", Icon="zap", Duration=3 }) end },
+                            { Title="Cancel", Variant="Tertiary", Callback=function()
+                                flingWarningAcknowledged = false
+                                flingEnabled = false
+                                WindUI:Notify({ Title="Fling", Content="Fling cancelled.", Icon="x-circle", Duration=2 })
+                            end },
+                            { Title="I Understand", Icon="check", Variant="Primary", Callback=function()
+                                flingEnabled = true
+                                if flingToggleRef then pcall(function() flingToggleRef:Set(true) end) end
+                                startFlingDetection()
+                                WindUI:Notify({ Title="Fling", Content="Walk into players to fling them!", Icon="zap", Duration=3 })
+                            end },
                         },
                     })
-                else flingEnabled=true; startFlingDetection(); WindUI:Notify({ Title="Fling", Content="Walk into players to fling them!", Icon="zap", Duration=3 }) end
-            else stopFlingDetection(); WindUI:Notify({ Title="Fling", Content="Fling disabled.", Icon="zap-off", Duration=2 }) end
+                else
+                    flingEnabled = true
+                    startFlingDetection()
+                    WindUI:Notify({ Title="Fling", Content="Walk into players to fling them!", Icon="zap", Duration=3 })
+                end
+            else
+                stopFlingDetection()
+                WindUI:Notify({ Title="Fling", Content="Fling disabled.", Icon="zap-off", Duration=2 })
+            end
         end,
     })
-    TrollingSection:Slider({ Title="Fling Range", Desc="How close (studs) you need to be to trigger a fling", Step=1, Value={Min=2,Max=10,Default=4}, Callback=function(v) FLING_RANGE=v end })
-    TrollingSection:Slider({ Title="Fling Height", Desc="How high the target arcs upward", Step=5, Value={Min=20,Max=300,Default=120}, Callback=function(v) FLING_HEIGHT=v end })
-    TrollingSection:Slider({ Title="Cooldown (s)", Desc="Seconds before the same player can be flung again", Step=1, Value={Min=1,Max=15,Default=3}, Callback=function(v) FLING_COOLDOWN=v end })
+
+    TrollingSection:Slider({ Title="Fling Range",   Desc="Proximity distance (studs) to trigger fling", Step=1, Value={Min=2,Max=12,Default=5},  Callback=function(v) FLING_RANGE=v end })
+    TrollingSection:Slider({ Title="Cooldown (s)",  Desc="Seconds before the same player can be flung again", Step=1, Value={Min=1,Max=15,Default=4}, Callback=function(v) FLING_COOLDOWN=v end })
 end
 
 -- ============================================================
