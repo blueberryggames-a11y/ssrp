@@ -1,4 +1,4 @@
--- fixed anim AND ADDED WALK ONES
+-- fixed animssss AND WALK ANIMATION
 
 -- ==================== SERVICES ====================
 local Players          = game:GetService("Players")
@@ -1406,7 +1406,7 @@ do
     walkAnimDropdown = WalkAnimSection:Dropdown({
         Title   = "👑 Walk Style",
         Desc    = "Choose a walk/run/idle animation pack.",
-        List    = walkDropOptions,
+        Values  = walkDropOptions,
         Locked  = true,
         LockedTitle = "Upgrade to Premium at pandauth.com.",
         Callback = function(selected)
@@ -1418,11 +1418,12 @@ do
                 WindUI:Notify({ Title="Walk Animations", Content="Enable Walk Animations first with the toggle above.", Icon="alert-circle", Duration=3 })
                 return
             end
-            local pack = walkPackByName[selected]
+            local packName = type(selected) == "table" and selected.Title or tostring(selected)
+            local pack = walkPackByName[packName]
             if not pack then return end
-            currentWalkPackName = selected
+            currentWalkPackName = packName
             applyWalkPack(pack)
-            WindUI:Notify({ Title="Walk Style", Content="Applied: " .. selected, Icon="footprints", Duration=2 })
+            WindUI:Notify({ Title="Walk Style", Content="Applied: " .. packName, Icon="footprints", Duration=2 })
         end,
     })
 
@@ -1721,7 +1722,7 @@ do
     animDropdown = AnimSection:Dropdown({
         Title   = "👑 Pick Dance Animation",
         Desc    = "Select a dance or emote to play. Visible to all players.",
-        List    = dropdownOptions,
+        Values  = dropdownOptions,
         Locked  = true,
         LockedTitle = "Upgrade to Premium at pandauth.com.",
         Callback = function(selected)
@@ -1733,10 +1734,11 @@ do
                 WindUI:Notify({ Title="Dance Animations", Content="Enable Dance Animations first using the toggle above.", Icon="alert-circle", Duration=3 })
                 return
             end
-            local id = nameToId[selected]
+            local animName = type(selected) == "table" and selected.Title or tostring(selected)
+            local id = nameToId[animName]
             if not id then return end
             playAnimation(id)
-            WindUI:Notify({ Title="▶ Playing", Content=selected, Icon="music", Duration=2 })
+            WindUI:Notify({ Title="▶ Playing", Content=animName, Icon="music", Duration=2 })
         end,
     })
 
