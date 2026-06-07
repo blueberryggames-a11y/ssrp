@@ -1,4 +1,4 @@
--- fixed animssss AND WALK ANIMATION
+-- fixed animssss AND WALK EEEE
 
 -- ==================== SERVICES ====================
 local Players          = game:GetService("Players")
