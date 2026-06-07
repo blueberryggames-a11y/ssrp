@@ -1,4 +1,4 @@
--- fixed animssss AND WALK EEEE
+-- fixed animssss
 
 -- ==================== SERVICES ====================
 local Players          = game:GetService("Players")
@@ -1852,136 +1852,214 @@ end
 
 -- ============================================================
 --  MISC – Anti-Fling (PREMIUM)
+--
+--  WHY THE OLD VERSION FAILED:
+--  Zeroing velocity + setting CFrame once does nothing — Roblox's
+--  physics engine re-applies the fling force the very next frame,
+--  immediately overwriting both. You need to HAMMER the suppression
+--  every single Heartbeat for the full recovery window so the engine
+--  never gets a free frame to accelerate you again.
+--
+--  HOW THIS VERSION WORKS:
+--  • Watches RootPart velocity on Heartbeat (post-physics, best timing).
+--  • Saves safe position only while grounded AND calm.
+--  • On spike detection: immediately enter SUPPRESSING state.
+--  • SUPPRESSING: every Heartbeat —
+--      1. Kill all foreign force objects on the root (new ones too —
+--         attackers may re-add them every frame).
+--      2. Zero AssemblyLinearVelocity + AssemblyAngularVelocity on
+--         EVERY body part (repeated each frame beats the engine).
+--      3. Pin the RootPart CFrame to safePosition every frame.
+--      4. Force humanoid GettingUp state to prevent ragdoll lock.
+--  • Stay in SUPPRESSING for SUPPRESS_DURATION seconds regardless of
+--    velocity (the velocity reads 0 anyway since we're zeroing it).
+--  • After SUPPRESS_DURATION: enter COOLDOWN for COOLDOWN_DURATION
+--    seconds — stop pinning CFrame (so the player can move again)
+--    but keep zeroing any residual velocity each frame.
+--  • After COOLDOWN: return to idle WATCHING state.
 -- ============================================================
 do
     local AntiFlingSection = MiscTab:Section({ Title="Anti-Fling" })
-    local antiFlingEnabled = false
-    local antiFlingConn    = nil
+    local antiFlingEnabled  = false
+    local antiFlingConn     = nil
     local antiFlingWarningAcknowledged = false
     local antiFlingToggleRef = nil
 
-    local VELOCITY_THRESHOLD = 80
-    local ANGULAR_THRESHOLD  = 5
-    local RECOVER_GRACE      = 0.5
-    local NOTIFY_COOLDOWN    = 2
+    -- Tunable thresholds
+    local VELOCITY_THRESHOLD = 75   -- studs/s horizontal spike to trigger
+    local ANGULAR_THRESHOLD  = 6    -- rad/s angular spike to trigger
+    local SUPPRESS_DURATION  = 0.6  -- seconds to aggressively pin position
+    local COOLDOWN_DURATION  = 0.3  -- seconds of velocity-zeroing after pin
+    local NOTIFY_COOLDOWN    = 2.5  -- min seconds between notifications
+    local SAFE_SAVE_INTERVAL = 0.1  -- save safe position at most every N seconds
 
-    local safePosition   = nil
-    local isFlung        = false
-    local recoverTimer   = 0
+    -- Runtime state  (reset fully on enable/disable/respawn)
+    local safePosition   = nil   -- last known good CFrame
+    local lastSafeSave   = 0     -- tick() when we last wrote safePosition
+
+    -- FSM: "WATCH" | "SUPPRESS" | "COOLDOWN"
+    local STATE          = "WATCH"
+    local stateTimer     = 0     -- time spent in current state
     local lastNotifyTick = 0
-    local hasRecovered   = false
 
-    local function getRoot() local c = player.Character; return c and c:FindFirstChild("HumanoidRootPart") end
-    local function getHum()  local c = player.Character; return c and c:FindFirstChildOfClass("Humanoid") end
+    local function getRoot()
+        local c = player.Character; return c and c:FindFirstChild("HumanoidRootPart")
+    end
+    local function getHum()
+        local c = player.Character; return c and c:FindFirstChildOfClass("Humanoid")
+    end
+    local function getChar()
+        return player.Character
+    end
 
-    local CBD_OWN_NAMES = {
-        AirResistance = true,
-        Stabilizer    = true,
-    }
+    -- Names of force objects that CBD itself places — never destroy these
+    local CBD_OWN = { AirResistance=true, Stabilizer=true }
 
-    local function destroyForeignMovers()
-        local root = getRoot()
-        if not root then return end
+    -- Destroy every foreign mover on the root right now
+    local function nukeMovers(root)
         for _, obj in ipairs(root:GetChildren()) do
-            if (obj:IsA("BodyVelocity")
-            or  obj:IsA("BodyForce")
-            or  obj:IsA("BodyPosition")
-            or  obj:IsA("BodyThrust")
-            or  obj:IsA("VectorForce")
-            or  obj:IsA("LinearVelocity"))
-            and not CBD_OWN_NAMES[obj.Name] then
+            if not CBD_OWN[obj.Name] and (
+                obj:IsA("BodyVelocity") or obj:IsA("BodyForce")    or
+                obj:IsA("BodyPosition") or obj:IsA("BodyThrust")   or
+                obj:IsA("BodyAngularVelocity") or
+                obj:IsA("VectorForce")  or obj:IsA("LinearVelocity") or
+                obj:IsA("AngularVelocity")
+            ) then
                 pcall(function() obj:Destroy() end)
             end
         end
     end
 
-    local function respondToFling(root, hum, horizMag)
-        local now = tick()
-        if (now - lastNotifyTick) >= NOTIFY_COOLDOWN then
-            lastNotifyTick = now
-            WindUI:Notify({
-                Title   = "⚠️ Fling Detected!",
-                Content = string.format("Speed spike: %.0f studs/s — teleporting back.", horizMag),
-                Icon    = "alert-triangle",
-                Duration = 4,
-            })
-        end
-        destroyForeignMovers()
-        local char = player.Character
-        if char then
-            for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.AssemblyLinearVelocity  = Vector3.zero
-                    part.AssemblyAngularVelocity = Vector3.zero
-                end
+    -- Zero velocity on every BasePart in the character
+    local function nukeVelocity(char)
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.AssemblyLinearVelocity  = Vector3.zero
+                part.AssemblyAngularVelocity = Vector3.zero
             end
         end
-        if safePosition and root and root.Parent then
-            root.CFrame = safePosition
-        end
-        if hum then
-            pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
-        end
-        LOG("ANTIFLING", "One-shot response done. horizMag=" .. string.format("%.1f", horizMag))
+    end
+
+    local function resetState()
+        STATE      = "WATCH"
+        stateTimer = 0
     end
 
     local function disableAntiFling()
         antiFlingEnabled = false
         if antiFlingConn then antiFlingConn:Disconnect(); antiFlingConn = nil end
-        safePosition   = nil
-        isFlung        = false
-        recoverTimer   = 0
-        hasRecovered   = false
+        safePosition  = nil
+        lastSafeSave  = 0
+        resetState()
     end
 
     local function enableAntiFling()
         disableAntiFling()
         antiFlingEnabled = true
         safePosition     = nil
-        isFlung          = false
-        recoverTimer     = 0
-        hasRecovered     = false
+        lastSafeSave     = 0
+        resetState()
 
-        antiFlingConn = RunService.Stepped:Connect(function(_, dt)
+        -- Use Heartbeat: runs AFTER physics simulation each frame.
+        -- This is the last chance to override what the physics engine
+        -- just did before the frame is rendered — perfect for anti-fling.
+        antiFlingConn = RunService.Heartbeat:Connect(function(dt)
             if not antiFlingEnabled then return end
             if _CBD_SelfImmune then return end
 
             local root = getRoot()
             local hum  = getHum()
-            if not root or not hum then return end
+            local char = getChar()
+            if not root or not hum or not char then return end
 
             local linVel   = root.AssemblyLinearVelocity
             local angVel   = root.AssemblyAngularVelocity
             local horizMag = Vector3.new(linVel.X, 0, linVel.Z).Magnitude
             local angMag   = angVel.Magnitude
 
-            local isGrounded = (hum.FloorMaterial ~= Enum.Material.Air)
-            if not isFlung and isGrounded and horizMag < (VELOCITY_THRESHOLD * 0.4) then
-                safePosition = root.CFrame
-            end
+            -- ── WATCH state ──────────────────────────────────────
+            if STATE == "WATCH" then
+                -- Save safe position periodically while calm & grounded
+                local isGrounded = hum.FloorMaterial ~= Enum.Material.Air
+                local now = tick()
+                if isGrounded
+                    and horizMag < VELOCITY_THRESHOLD * 0.35
+                    and angMag   < ANGULAR_THRESHOLD  * 0.5
+                    and (now - lastSafeSave) >= SAFE_SAVE_INTERVAL
+                then
+                    safePosition = root.CFrame
+                    lastSafeSave = now
+                end
 
-            local spikeDetected = (horizMag > VELOCITY_THRESHOLD) or (angMag > ANGULAR_THRESHOLD)
+                -- Spike detection
+                local spiked = horizMag > VELOCITY_THRESHOLD or angMag > ANGULAR_THRESHOLD
+                if spiked then
+                    STATE      = "SUPPRESS"
+                    stateTimer = 0
+                    LOG("ANTIFLING","Spike detected — horizMag="..string.format("%.0f",horizMag).." angMag="..string.format("%.1f",angMag))
 
-            if not isFlung then
-                if spikeDetected then
-                    isFlung      = true
-                    recoverTimer = 0
-                    hasRecovered = false
-                    LOG("ANTIFLING", "Spike! horizMag=" .. string.format("%.1f", horizMag) .. " angMag=" .. string.format("%.2f", angMag))
+                    -- Notify (throttled)
+                    local nowT = tick()
+                    if (nowT - lastNotifyTick) >= NOTIFY_COOLDOWN then
+                        lastNotifyTick = nowT
+                        WindUI:Notify({
+                            Title    = "⚠️ Fling Blocked!",
+                            Content  = string.format("Spike %.0f studs/s — suppressing.", horizMag),
+                            Icon     = "shield",
+                            Duration = 3,
+                        })
+                    end
                 end
-            else
-                if not hasRecovered then
-                    hasRecovered = true
-                    respondToFling(root, hum, horizMag)
+
+            -- ── SUPPRESS state ───────────────────────────────────
+            -- Aggressively fight the physics engine every single frame:
+            -- kill movers, zero velocity, pin CFrame.
+            elseif STATE == "SUPPRESS" then
+                stateTimer = stateTimer + dt
+
+                -- 1. Kill any force objects the attacker may have re-added
+                nukeMovers(root)
+
+                -- 2. Zero velocity on every limb
+                nukeVelocity(char)
+
+                -- 3. Pin the root to the safe position every frame
+                if safePosition and root.Parent then
+                    root.CFrame = safePosition
                 end
-                if not spikeDetected then
-                    recoverTimer = recoverTimer + dt
+
+                -- 4. Pull out of ragdoll / seated states
+                if hum then
+                    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,  false) end)
+                    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false) end)
+                    pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
                 end
-                if recoverTimer >= RECOVER_GRACE then
-                    isFlung      = false
-                    recoverTimer = 0
-                    hasRecovered = false
-                    LOG("ANTIFLING", "Stable — returning to idle watch")
+
+                -- Transition to cooldown after SUPPRESS_DURATION
+                if stateTimer >= SUPPRESS_DURATION then
+                    STATE      = "COOLDOWN"
+                    stateTimer = 0
+                    LOG("ANTIFLING","Suppression done — entering cooldown")
+                    -- Re-enable ragdoll states we locked
+                    if hum then
+                        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,    true) end)
+                        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true) end)
+                    end
+                end
+
+            -- ── COOLDOWN state ───────────────────────────────────
+            -- Stop pinning CFrame (player can move again), but keep
+            -- zeroing any residual velocity for COOLDOWN_DURATION.
+            elseif STATE == "COOLDOWN" then
+                stateTimer = stateTimer + dt
+
+                -- Still kill movers and zero velocity (no CFrame pin)
+                nukeMovers(root)
+                nukeVelocity(char)
+
+                if stateTimer >= COOLDOWN_DURATION then
+                    resetState()
+                    LOG("ANTIFLING","Cooldown done — back to WATCH")
                 end
             end
         end)
@@ -1989,28 +2067,30 @@ do
 
     player.CharacterAdded:Connect(function()
         safePosition = nil
-        isFlung      = false
-        recoverTimer = 0
-        hasRecovered = false
-        if antiFlingEnabled then task.wait(0.5); enableAntiFling() end
+        lastSafeSave = 0
+        resetState()
+        if antiFlingEnabled then task.wait(0.6); enableAntiFling() end
     end)
 
     antiFlingToggle = AntiFlingSection:Toggle({
-        Title="👑 Anti-Fling",
-        Desc="Detects velocity spikes and teleports you back once. No frame-hammering — controls stay responsive.",
-        Value=false, Locked=true, LockedTitle="Upgrade to Premium at pandauth.com to access Anti-Fling.",
-        Callback=function(state)
+        Title       = "👑 Anti-Fling",
+        Desc        = "Aggressively blocks fling attempts by suppressing velocity every frame for half a second.",
+        Value       = false,
+        Locked      = true,
+        LockedTitle = "Upgrade to Premium at pandauth.com to access Anti-Fling.",
+        Callback    = function(state)
             if not isPremium then
-                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 }); return
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                return
             end
             if state then
                 if not antiFlingWarningAcknowledged then
                     if antiFlingToggleRef then pcall(function() antiFlingToggleRef:Set(false) end) end
                     antiFlingWarningAcknowledged = true
                     WindUI:Popup({
-                        Title="⚠️ Anti-Fling Info", Icon="alert-triangle",
-                        Content="Anti-Fling monitors your velocity every physics step. On detecting a spike it sends a notification, teleports you back to your last safe position, and zeroes all forces — exactly once per fling event, so your controls are never delayed.",
-                        Buttons={
+                        Title   = "⚠️ Anti-Fling Info", Icon="alert-triangle",
+                        Content = "Anti-Fling detects velocity spikes and aggressively suppresses them every frame for 0.6s — zeroing all velocities, destroying injected force objects, and pinning your position. Controls return immediately after.",
+                        Buttons = {
                             { Title="Cancel", Variant="Tertiary", Callback=function()
                                 antiFlingWarningAcknowledged = false
                                 antiFlingEnabled = false
@@ -2036,22 +2116,25 @@ do
     antiFlingToggleRef = antiFlingToggle
 
     AntiFlingSection:Slider({
-        Title="Velocity Threshold",
-        Desc="Horizontal studs/s required to trigger the fling detector",
-        Step=5, Value={Min=30, Max=300, Default=80},
-        Callback=function(v) VELOCITY_THRESHOLD=v end
+        Title    = "Velocity Threshold",
+        Desc     = "Horizontal studs/s to trigger fling detection (lower = more sensitive)",
+        Step     = 5,
+        Value    = { Min=30, Max=300, Default=75 },
+        Callback = function(v) VELOCITY_THRESHOLD = v end,
     })
     AntiFlingSection:Slider({
-        Title="Calm Grace Period (0.1s)",
-        Desc="How long velocity must stay normal before going back to idle",
-        Step=1, Value={Min=2, Max=30, Default=5},
-        Callback=function(v) RECOVER_GRACE=v/10 end
+        Title    = "Suppress Duration (0.1s steps)",
+        Desc     = "How many frames to aggressively lock position after a fling (higher = stronger block)",
+        Step     = 1,
+        Value    = { Min=2, Max=20, Default=6 },
+        Callback = function(v) SUPPRESS_DURATION = v / 10 end,
     })
     AntiFlingSection:Slider({
-        Title="Notify Cooldown (s)",
-        Desc="Minimum seconds between fling-detected notifications",
-        Step=1, Value={Min=1, Max=10, Default=2},
-        Callback=function(v) NOTIFY_COOLDOWN=v end
+        Title    = "Notify Cooldown (s)",
+        Desc     = "Minimum seconds between fling-detected notifications",
+        Step     = 1,
+        Value    = { Min=1, Max=10, Default=2 },
+        Callback = function(v) NOTIFY_COOLDOWN = v end,
     })
 end
 
