@@ -1,4 +1,4 @@
--- fixed anims
+-- fixed animssss
 
 -- ==================== SERVICES ====================
 local Players          = game:GetService("Players")
