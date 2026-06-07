@@ -146,7 +146,9 @@ local function applyPremium(value, source, expires)
     if walkAnimDropdown then pcall(function() if isPremium then walkAnimDropdown:Unlock() else walkAnimDropdown:Lock() end end) end
     if walkFlingToggle  then pcall(function() if isPremium then walkFlingToggle:Unlock()  else walkFlingToggle:Lock()  end end) end
     if carFlingToggle   then pcall(function() if isPremium then carFlingToggle:Unlock()   else carFlingToggle:Lock()   end end) end
-    if isPremium then
+    -- Only show the premium-active toast when a real user action triggered it,
+    -- not during the automatic startup unlock sweep.
+    if isPremium and _CBD_UserClick then
         WindUI:Notify({ Title="⭐ Premium Active", Content="Premium features unlocked! Expires: "..keyExpiry, Icon="crown", Duration=6 })
     end
 end
@@ -263,8 +265,14 @@ local function tryAutoValidate()
     end
     local isSuccess, isPrem, expires = resolveResult(result)
     if isSuccess then
+        -- Auto-login is NOT a user click — suppress the "Premium Active" toast here
+        -- and show our own tailored one instead.
         applyPremium(isPrem, "AutoLogin-SavedKey", expires)
-        WindUI:Notify({ Title="✅ Auto-Login", Content=(isPrem and "⭐ Premium" or "Free").." • Expires: "..expires, Icon="check-circle", Duration=5 })
+        if isPrem then
+            WindUI:Notify({ Title="✅ Auto-Login", Content="⭐ Premium • Expires: "..expires, Icon="check-circle", Duration=5 })
+        else
+            WindUI:Notify({ Title="✅ Auto-Login", Content="Free tier • Expires: "..expires, Icon="check-circle", Duration=5 })
+        end
     else
         local reason = type(result)=="table" and tostring(result.error or result.message or result.reason or "Invalid key") or "Invalid key"
         WindUI:Notify({ Title="Auto-Login Failed: "..reason, Content="Re-enter your key in the key system.", Icon="x-circle", Duration=5 })
@@ -306,7 +314,9 @@ Window = WindUI:CreateWindow({
                         local rawKey = enteredKey.key or enteredKey.keyValue or enteredKey.licenseKey
                             or enteredKey.license or enteredKey.keyString or enteredKey.value or nil
                         if rawKey then saveKeyToDisk(rawKey) end
+                        _CBD_UserClick = true
                         applyPremium(isPrem, "WindUI-PreResolved", expires)
+                        _CBD_UserClick = false
                         WindUI:Notify({ Title="✅ Key Valid", Content=(isPrem and "⭐ Premium" or "Free").." • Expires: "..expires, Icon="check-circle", Duration=5 })
                     else
                         local reason = tostring(enteredKey.error or enteredKey.message or enteredKey.reason or "Invalid key")
@@ -331,7 +341,9 @@ Window = WindUI:CreateWindow({
                 local isSuccess, isPrem, expires = resolveResult(result)
                 if isSuccess then
                     saveKeyToDisk(enteredKey)
+                    _CBD_UserClick = true
                     applyPremium(isPrem, "KeySystem-Cookies", expires)
+                    _CBD_UserClick = false
                     WindUI:Notify({ Title="✅ Key Valid", Content=(isPrem and "⭐ Premium" or "Free").." • Expires: "..expires, Icon="check-circle", Duration=5 })
                 else
                     local reason = type(result)=="table"
@@ -360,14 +372,6 @@ task.defer(function()
 end)
 
 -- ==================== TABS ====================
--- Tab layout:
---   Movement  → Fly V1, Fly V2, Speed V1, Speed V2, Noclip
---   Stealth   → Invisibility
---   Trolling  → Proximity Fling, Safe Fling (Walk/Car)
---   Teleport  → Click TP, Saved Positions
---   Fun       → Dance Animations, Walk Animations
---   Misc      → Mod Watcher, Anti-Fling
-
 local MovementTab = Window:Tab({ Title="Movement",   Icon="footprints"  })
 local StealthTab  = Window:Tab({ Title="Stealth",    Icon="eye-off"     })
 local TrollingTab = Window:Tab({ Title="Trolling",   Icon="laugh"       })
@@ -593,14 +597,11 @@ end
 
 -- ============================================================
 --  MOVEMENT TAB — SPEED V1 (ERX Frame-Delta CFrame Nudge)
---  No WalkSpeed touched, no forces. Reads MoveDirection and
---  offsets rootPart.CFrame by the extra delta each frame.
---  Skips when seated in a vehicle/seat.
 -- ============================================================
 do
     local SpeedSection = MovementTab:Section({ Title="Speed V1  •  ERX Method" })
     local erxEnabled   = false
-    local erxTarget    = 16   -- studs/s desired (default = normal walkspeed)
+    local erxTarget    = 16
     local erxLoop      = nil
 
     local function erxGetChar() return player.Character end
@@ -622,7 +623,7 @@ do
         stopERXLoop()
         erxLoop = task.spawn(function()
             while true do
-                local dt = task.wait()   -- real elapsed time, same as ERX original
+                local dt = task.wait()
                 if not erxEnabled then continue end
                 local hum  = erxGetHum()
                 local root = erxGetRoot()
@@ -631,7 +632,6 @@ do
                 if moveDir.Magnitude > 0 then
                     local base = hum.WalkSpeed
                     if erxTarget ~= base then
-                        -- nudge the CFrame by the extra distance this frame
                         local extra = moveDir * ((erxTarget - base) * dt)
                         root.CFrame = root.CFrame + extra
                     end
@@ -690,9 +690,7 @@ do
         Desc     = "Desired movement speed in studs/s (16 = default walk)",
         Step     = 1,
         Value    = { Min=16, Max=250, Default=16 },
-        Callback = function(v)
-            erxTarget = v
-        end,
+        Callback = function(v) erxTarget = v end,
     })
 
     SpeedSection:Button({
@@ -897,7 +895,6 @@ do
     local function getInvisChar()  return player.Character end
     local function getInvisRoot()  local c=player.Character; return c and c:FindFirstChild("HumanoidRootPart") end
 
-    -- Optional ghost transparency for self (others always see you invisible)
     local invisGhostAlpha = 0.3
     local invisGhostEnabled = true
 
@@ -933,11 +930,9 @@ do
         local savedCF = root.CFrame
         local highPos = CFrame.new(0, 1e6, 0)
 
-        -- Teleport high to allow seat occupancy to register
         root.CFrame = highPos
         task.wait(0.15)
 
-        -- Build the invisible seat model
         invisWeldModel = Instance.new("Model")
         invisWeldModel.Name = "InvisSeatModel"
         invisWeldModel.Parent = workspace
@@ -950,7 +945,6 @@ do
         seat.Position    = highPos.Position
         seat.Parent      = invisWeldModel
 
-        -- Weld seat to torso
         local torso = player.Character:FindFirstChild("Torso")
             or player.Character:FindFirstChild("UpperTorso")
         if torso then
@@ -962,10 +956,8 @@ do
 
         task.wait(0.1)
 
-        -- Return model to original position
         invisWeldModel:PivotTo(savedCF)
 
-        -- Ghost effect (self-view only)
         if invisGhostEnabled then
             setSelfTransparency(invisGhostAlpha)
             invisTransConn = RunService.Heartbeat:Connect(function()
@@ -982,7 +974,6 @@ do
         invisCleanup()
     end
 
-    -- Keybind toggle (K)
     local invisKeybindEnabled = true
     UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed or not invisKeybindEnabled then return end
@@ -997,7 +988,6 @@ do
         end
     end)
 
-    -- Respawn handling
     player.CharacterAdded:Connect(function()
         local wasActive = invisActive
         invisActive = false
@@ -1010,7 +1000,6 @@ do
         end
     end)
 
-    -- Main toggle
     InvisSection:Toggle({
         Title   = "Enable Invisibility",
         Desc    = "Uses seat/weld trick to make you invisible to others. Keybind: K",
@@ -1031,7 +1020,6 @@ do
         end,
     })
 
-    -- Ghost effect toggle (whether YOU can see yourself as semi-transparent)
     InvisSection:Toggle({
         Title   = "Ghost Effect (Self)",
         Desc    = "Makes yourself slightly transparent in your own view while invisible.",
@@ -1039,7 +1027,6 @@ do
         Callback = function(state)
             invisGhostEnabled = state
             if not invisActive then return end
-            -- Reconnect or disconnect ghost loop
             if invisTransConn then invisTransConn:Disconnect(); invisTransConn=nil end
             if state then
                 setSelfTransparency(invisGhostAlpha)
@@ -1059,9 +1046,7 @@ do
         Desc     = "How transparent you appear to yourself (0 = fully visible, 1 = fully invisible)",
         Step     = 0.05,
         Value    = { Min=0, Max=1, Default=0.3 },
-        Callback = function(v)
-            invisGhostAlpha = v
-        end,
+        Callback = function(v) invisGhostAlpha = v end,
     })
 end
 
@@ -1256,7 +1241,7 @@ do
 end
 
 -- ============================================================
---  TROLLING TAB — SAFE FLING (PREMIUM, formerly ERX Self-Fling)
+--  TROLLING TAB — SAFE FLING (PREMIUM)
 -- ============================================================
 do
     local SafeFlingSection = TrollingTab:Section({ Title="Safe Fling  •  👑 Premium" })
@@ -1565,6 +1550,9 @@ end
 
 -- ============================================================
 --  FUN TAB — DANCE ANIMATIONS (PREMIUM)
+--  FIX: Animation instance must NOT be destroyed until after
+--  Play() is called. Store a reference, destroy after a short
+--  delay so the engine has time to register the asset.
 -- ============================================================
 do
     local AnimSection = FunTab:Section({ Title="Dance Animations  •  👑 Premium" })
@@ -1661,38 +1649,99 @@ do
     local animLooped    = true
     local animSpeedConn = nil
 
-    local function getDanceHum() local c=player.Character; return c and c:FindFirstChildOfClass("Humanoid") end
+    local function getDanceHum()
+        local c = player.Character
+        return c and c:FindFirstChildOfClass("Humanoid")
+    end
 
+    -- ----------------------------------------------------------------
+    --  Core play helper
+    --  BUG FIX: Do NOT destroy the Animation instance until AFTER
+    --  Play() is called. Destroying it early causes the engine to lose
+    --  the asset reference and the track silently does nothing for
+    --  custom / user-entered IDs. We defer destruction by one frame.
+    -- ----------------------------------------------------------------
     local function stopAnimation()
-        if currentTrack then pcall(function() currentTrack:Stop() end); pcall(function() currentTrack:Destroy() end); currentTrack=nil end
-        if animSpeedConn then animSpeedConn:Disconnect(); animSpeedConn=nil end
+        if currentTrack then
+            pcall(function() currentTrack:Stop() end)
+            pcall(function() currentTrack:Destroy() end)
+            currentTrack = nil
+        end
+        if animSpeedConn then
+            animSpeedConn:Disconnect()
+            animSpeedConn = nil
+        end
     end
 
     local function stopAllAnimations()
-        local hum=getDanceHum(); if not hum then return end
+        local hum = getDanceHum()
+        if not hum then return end
         stopAnimation()
-        for _, track in ipairs(hum:GetPlayingAnimationTracks()) do pcall(function() track:Stop() end) end
+        for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+            pcall(function() track:Stop() end)
+        end
         WindUI:Notify({ Title="Dance Animations", Content="All animations stopped.", Icon="square", Duration=2 })
     end
 
     local function playAnimation(id)
         if not isPremium then return end
-        local hum=getDanceHum()
-        if not hum then WindUI:Notify({ Title="Dance Animations", Content="No humanoid found.", Icon="alert-circle", Duration=3 }); return end
+        local hum = getDanceHum()
+        if not hum then
+            WindUI:Notify({ Title="Dance Animations", Content="No humanoid found.", Icon="alert-circle", Duration=3 })
+            return
+        end
+
         stopAnimation()
-        currentAnimId=id
-        local anim=Instance.new("Animation"); anim.AnimationId="rbxassetid://"..tostring(id)
-        local ok, track=pcall(function() return hum:LoadAnimation(anim) end); anim:Destroy()
-        if not ok or not track then WindUI:Notify({ Title="Dance Animations", Content="Failed to load animation "..id, Icon="alert-circle", Duration=3 }); return end
-        currentTrack=track; currentTrack.Looped=animLooped; currentTrack:Play(); currentTrack:AdjustSpeed(animSpeed)
-        animSpeedConn=RunService.Heartbeat:Connect(function()
-            if currentTrack and currentTrack.IsPlaying then pcall(function() currentTrack:AdjustSpeed(animSpeed) end) end
+        currentAnimId = id
+
+        -- Create the Animation instance and keep it alive across LoadAnimation + Play
+        local anim = Instance.new("Animation")
+        anim.AnimationId = "rbxassetid://" .. tostring(id)
+
+        -- Parent it to somewhere safe so it isn't GC'd before the engine loads it
+        anim.Parent = hum
+
+        local ok, track = pcall(function()
+            return hum:LoadAnimation(anim)
+        end)
+
+        if not ok or not track then
+            anim.Parent = nil  -- cleanup on failure
+            pcall(function() anim:Destroy() end)
+            WindUI:Notify({
+                Title="Dance Animations",
+                Content="Failed to load animation " .. tostring(id),
+                Icon="alert-circle", Duration=3,
+            })
+            return
+        end
+
+        currentTrack = track
+        currentTrack.Looped = animLooped
+        currentTrack:Play()
+        currentTrack:AdjustSpeed(animSpeed)
+
+        -- Now safe to unparent/destroy the Animation instance
+        task.defer(function()
+            pcall(function() anim.Parent = nil end)
+            pcall(function() anim:Destroy() end)
+        end)
+
+        -- Keep speed in sync every frame (handles slider changes mid-play)
+        animSpeedConn = RunService.Heartbeat:Connect(function()
+            if currentTrack and currentTrack.IsPlaying then
+                pcall(function() currentTrack:AdjustSpeed(animSpeed) end)
+            end
         end)
     end
 
     player.CharacterAdded:Connect(function()
-        currentTrack=nil; animSpeedConn=nil
-        if animEnabled and currentAnimId then task.wait(1); playAnimation(currentAnimId) end
+        currentTrack    = nil
+        animSpeedConn   = nil
+        if animEnabled and currentAnimId then
+            task.wait(1)
+            playAnimation(currentAnimId)
+        end
     end)
 
     local dropdownOptions = {}
@@ -1703,19 +1752,26 @@ do
     end
 
     animToggle = AnimSection:Toggle({
-        Title="👑 Enable Dance Animations", Desc="Play dance/emote animations visible to everyone in the server.",
+        Title="👑 Enable Dance Animations",
+        Desc="Play dance/emote animations visible to everyone in the server.",
         Value=false, Locked=true, LockedTitle="Upgrade to Premium at pandauth.com to access Dance Animations.",
         Callback=function(state)
             if not isPremium then
                 WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 }); return
             end
-            animEnabled=state
-            if not state then stopAllAnimations() else WindUI:Notify({ Title="Dance Animations", Content="Pick an animation from the dropdown below.", Icon="music", Duration=3 }) end
+            animEnabled = state
+            if not state then
+                stopAllAnimations()
+            else
+                WindUI:Notify({ Title="Dance Animations", Content="Pick an animation from the dropdown below.", Icon="music", Duration=3 })
+            end
         end,
     })
 
     animDropdown = AnimSection:Dropdown({
-        Title="👑 Pick Dance Animation", Desc="Select a dance or emote to play. Visible to all players.", Values=dropdownOptions,
+        Title="👑 Pick Dance Animation",
+        Desc="Select a dance or emote to play. Visible to all players.",
+        Values=dropdownOptions,
         Locked=true, LockedTitle="Upgrade to Premium at pandauth.com.",
         Callback=function(selected)
             if not isPremium then
@@ -1724,23 +1780,65 @@ do
             if not animEnabled then
                 WindUI:Notify({ Title="Dance Animations", Content="Enable Dance Animations first using the toggle above.", Icon="alert-circle", Duration=3 }); return
             end
-            local animName=type(selected)=="table" and selected.Title or tostring(selected)
-            local id=nameToId[animName]; if not id then return end
+            local animName = type(selected) == "table" and selected.Title or tostring(selected)
+            local id = nameToId[animName]
+            if not id then return end
             playAnimation(id)
             WindUI:Notify({ Title="▶ Playing", Content=animName, Icon="music", Duration=2 })
         end,
     })
 
-    AnimSection:Toggle({ Title="Loop Animation", Desc="Whether the animation repeats automatically.", Value=true, Callback=function(state) animLooped=state; if currentTrack then pcall(function() currentTrack.Looped=state end) end end })
-    AnimSection:Slider({ Title="Animation Speed", Desc="Playback speed multiplier (1 = normal).", Step=0.1, Value={Min=0.1,Max=5,Default=1}, Callback=function(v) animSpeed=v; if currentTrack and currentTrack.IsPlaying then pcall(function() currentTrack:AdjustSpeed(animSpeed) end) end end })
-    AnimSection:Button({ Title="Stop All Animations", Desc="Immediately stops every playing animation.", Icon="square", Callback=function() stopAllAnimations() end })
-    AnimSection:Input({ Title="Custom Animation ID", Desc="Enter any Roblox animation asset ID to play it.", Placeholder="e.g. 507770239", Callback=function(text)
-        if not isPremium then WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 }); return end
-        if not animEnabled then WindUI:Notify({ Title="Dance Animations", Content="Enable Dance Animations first.", Icon="alert-circle", Duration=3 }); return end
-        local id=tonumber(text); if not id then WindUI:Notify({ Title="Dance Animations", Content="Invalid ID — numbers only.", Icon="x-circle", Duration=3 }); return end
-        playAnimation(id)
-        WindUI:Notify({ Title="▶ Custom", Content="Playing ID "..id, Icon="music", Duration=2 })
-    end })
+    AnimSection:Toggle({
+        Title="Loop Animation", Desc="Whether the animation repeats automatically.", Value=true,
+        Callback=function(state)
+            animLooped = state
+            if currentTrack then pcall(function() currentTrack.Looped = state end) end
+        end,
+    })
+
+    AnimSection:Slider({
+        Title="Animation Speed", Desc="Playback speed multiplier (1 = normal).",
+        Step=0.1, Value={Min=0.1, Max=5, Default=1},
+        Callback=function(v)
+            animSpeed = v
+            if currentTrack and currentTrack.IsPlaying then
+                pcall(function() currentTrack:AdjustSpeed(animSpeed) end)
+            end
+        end,
+    })
+
+    AnimSection:Button({
+        Title="Stop All Animations", Desc="Immediately stops every playing animation.",
+        Icon="square", Callback=function() stopAllAnimations() end,
+    })
+
+    -- ----------------------------------------------------------------
+    --  Custom Animation ID Input
+    --  BUG FIX: Same pattern — keep Animation alive through Play().
+    --  Also validate that the ID is a positive integer before trying.
+    -- ----------------------------------------------------------------
+    AnimSection:Input({
+        Title="Custom Animation ID",
+        Desc="Enter any Roblox animation asset ID to play it.",
+        Placeholder="e.g. 507770239",
+        Callback=function(text)
+            if not isPremium then
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 }); return
+            end
+            if not animEnabled then
+                WindUI:Notify({ Title="Dance Animations", Content="Enable Dance Animations first.", Icon="alert-circle", Duration=3 }); return
+            end
+            -- Strip any whitespace the user may have typed
+            local trimmed = text and text:match("^%s*(.-)%s*$") or ""
+            local id = tonumber(trimmed)
+            if not id or id <= 0 or math.floor(id) ~= id then
+                WindUI:Notify({ Title="Dance Animations", Content="Invalid ID — enter a positive integer.", Icon="x-circle", Duration=3 }); return
+            end
+            id = math.floor(id)
+            playAnimation(id)
+            WindUI:Notify({ Title="▶ Custom", Content="Playing ID " .. tostring(id), Icon="music", Duration=2 })
+        end,
+    })
 end
 
 -- ============================================================
@@ -1801,48 +1899,76 @@ end
 
 -- ============================================================
 --  MISC TAB — ANTI-FLING (PREMIUM)
+--  Upgraded to multi-stage detection logic:
+--    1. High velocity
+--    2. Acceleration spike
+--    3. CFrame jump (per Stepped frame)
+--    4. Anchor tether distance breach
+--    5. Vertical fling
+--    6. Rotational spin
+--  All detection runs on Stepped (pre-physics) with a Heartbeat
+--  backup for ultra-fast CFrame changes. Integrated with WindUI
+--  for all notifications — no standalone GUI.
 -- ============================================================
 do
     local AntiFlingSection = MiscTab:Section({ Title="Anti-Fling" })
-    local antiFlingEnabled  = false
-    local antiFlingConn     = nil
-    local antiFlingWarningAcknowledged = false
-    local antiFlingToggleRef = nil
 
-    local VELOCITY_THRESHOLD = 75
-    local ANGULAR_THRESHOLD  = 6
-    local SUPPRESS_DURATION  = 0.6
-    local COOLDOWN_DURATION  = 0.3
-    local NOTIFY_COOLDOWN    = 2.5
-    local SAFE_SAVE_INTERVAL = 0.1
+    -- ---- Config (sliders feed into this table) ----
+    local AF = {
+        MaxSpeed              = 150,    -- studs/s
+        MaxAcceleration       = 400,    -- studs/s²
+        MaxTeleportDistance   = 30,     -- CFrame jump per Stepped frame
+        RawFrameJump          = 15,     -- Heartbeat ultra-fast check
+        EnableAnchorTether    = true,
+        AnchorOffset          = Vector3.new(0, -3.5, 0),
+        MaxAnchorDistance     = 80,
+        ForceAnchorDuration   = 0.3,
+        MaxSuppressionsPerWindow = 3,
+        SuppressionWindow     = 1.5,
+        NotifyCooldown        = 2.5,
+    }
 
-    local safePosition   = nil
-    local lastSafeSave   = 0
+    local antiFlingActive    = false  -- master on/off
+    local antiFlingWarned    = false  -- popup acknowledged
 
-    local STATE          = "WATCH"
-    local stateTimer     = 0
-    local lastNotifyTick = 0
+    -- Runtime state
+    local afChar, afHum, afRoot, afAnchorPart
+    local afSafeCF    = CFrame.new()
+    local afPrevCF    = CFrame.new()
+    local afPrevVel   = Vector3.zero
+    local afCorrect   = false
+    local afSupHist   = {}
+    local afLastNotify= 0
 
-    local function getRoot() local c=player.Character; return c and c:FindFirstChild("HumanoidRootPart") end
-    local function getHum()  local c=player.Character; return c and c:FindFirstChildOfClass("Humanoid") end
-    local function getChar() return player.Character end
+    local afSteppedConn   = nil
+    local afHeartbeatConn = nil
 
-    local CBD_OWN = { AirResistance=true, Stabilizer=true }
-
-    local function nukeMovers(root)
-        for _, obj in ipairs(root:GetChildren()) do
-            if not CBD_OWN[obj.Name] and (
-                obj:IsA("BodyVelocity") or obj:IsA("BodyForce")    or
-                obj:IsA("BodyPosition") or obj:IsA("BodyThrust")   or
-                obj:IsA("BodyAngularVelocity") or
-                obj:IsA("VectorForce")  or obj:IsA("LinearVelocity") or
-                obj:IsA("AngularVelocity")
-            ) then pcall(function() obj:Destroy() end) end
+    -- ---- Anchor part ----
+    local function afCreateAnchor()
+        if afAnchorPart then pcall(function() afAnchorPart:Destroy() end) end
+        afAnchorPart = Instance.new("Part")
+        afAnchorPart.Name        = "_CBD_AntiFlingAnchor"
+        afAnchorPart.Anchored    = true
+        afAnchorPart.CanCollide  = false
+        afAnchorPart.Transparency = 1
+        afAnchorPart.Size        = Vector3.new(1, 1, 1)
+        afAnchorPart.Parent      = workspace
+        if afRoot then
+            afAnchorPart.CFrame = afRoot.CFrame * CFrame.new(AF.AnchorOffset)
         end
     end
 
-    local function nukeVelocity(char)
-        for _, part in ipairs(char:GetDescendants()) do
+    local function afDestroyAnchor()
+        if afAnchorPart then
+            pcall(function() afAnchorPart:Destroy() end)
+            afAnchorPart = nil
+        end
+    end
+
+    -- ---- Correction helpers ----
+    local function afZeroVelocity()
+        if not afRoot then return end
+        for _, part in ipairs(afChar:GetDescendants()) do
             if part:IsA("BasePart") then
                 part.AssemblyLinearVelocity  = Vector3.zero
                 part.AssemblyAngularVelocity = Vector3.zero
@@ -1850,93 +1976,285 @@ do
         end
     end
 
-    local function resetState() STATE="WATCH"; stateTimer=0 end
-
-    local function disableAntiFling()
-        antiFlingEnabled=false
-        if antiFlingConn then antiFlingConn:Disconnect(); antiFlingConn=nil end
-        safePosition=nil; lastSafeSave=0; resetState()
+    local function afNukeMovers()
+        if not afRoot then return end
+        -- Whitelist CBD's own named force objects so we don't clobber fly/speed
+        local CBD_OWNED = { AirResistance=true, Stabilizer=true }
+        for _, obj in ipairs(afRoot:GetChildren()) do
+            if not CBD_OWNED[obj.Name] and (
+                obj:IsA("BodyVelocity") or obj:IsA("BodyForce")    or
+                obj:IsA("BodyPosition") or obj:IsA("BodyThrust")   or
+                obj:IsA("BodyAngularVelocity") or
+                obj:IsA("VectorForce")  or obj:IsA("LinearVelocity") or
+                obj:IsA("AngularVelocity")
+            ) then
+                pcall(function() obj:Destroy() end)
+            end
+        end
     end
 
-    local function enableAntiFling()
-        disableAntiFling(); antiFlingEnabled=true; safePosition=nil; lastSafeSave=0; resetState()
-        antiFlingConn=RunService.Heartbeat:Connect(function(dt)
-            if not antiFlingEnabled then return end
-            if _CBD_SelfImmune then return end
-            local root=getRoot(); local hum=getHum(); local char=getChar()
-            if not root or not hum or not char then return end
-            local linVel=root.AssemblyLinearVelocity; local angVel=root.AssemblyAngularVelocity
-            local horizMag=Vector3.new(linVel.X,0,linVel.Z).Magnitude; local angMag=angVel.Magnitude
-            if STATE=="WATCH" then
-                local isGrounded=hum.FloorMaterial~=Enum.Material.Air; local now=tick()
-                if isGrounded and horizMag<VELOCITY_THRESHOLD*0.35 and angMag<ANGULAR_THRESHOLD*0.5 and (now-lastSafeSave)>=SAFE_SAVE_INTERVAL then
-                    safePosition=root.CFrame; lastSafeSave=now
-                end
-                local spiked=horizMag>VELOCITY_THRESHOLD or angMag>ANGULAR_THRESHOLD
-                if spiked then
-                    STATE="SUPPRESS"; stateTimer=0
-                    LOG("ANTIFLING","Spike detected — horizMag="..string.format("%.0f",horizMag).." angMag="..string.format("%.1f",angMag))
-                    local nowT=tick()
-                    if (nowT-lastNotifyTick)>=NOTIFY_COOLDOWN then
-                        lastNotifyTick=nowT
-                        WindUI:Notify({ Title="⚠️ Fling Blocked!", Content=string.format("Spike %.0f studs/s — suppressing.",horizMag), Icon="shield", Duration=3 })
-                    end
-                end
-            elseif STATE=="SUPPRESS" then
-                stateTimer=stateTimer+dt; nukeMovers(root); nukeVelocity(char)
-                if safePosition and root.Parent then root.CFrame=safePosition end
-                if hum then
-                    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,    false) end)
-                    pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false) end)
-                    pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
-                end
-                if stateTimer>=SUPPRESS_DURATION then
-                    STATE="COOLDOWN"; stateTimer=0
-                    LOG("ANTIFLING","Suppression done — entering cooldown")
-                    if hum then
-                        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,    true) end)
-                        pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true) end)
-                    end
-                end
-            elseif STATE=="COOLDOWN" then
-                stateTimer=stateTimer+dt; nukeMovers(root); nukeVelocity(char)
-                if stateTimer>=COOLDOWN_DURATION then resetState(); LOG("ANTIFLING","Cooldown done — back to WATCH") end
+    local function afForceAnchorAndReset(duration)
+        if not afRoot then return end
+        afRoot.Anchored = true
+        task.delay(duration or AF.ForceAnchorDuration, function()
+            if afRoot then
+                afRoot.Anchored = false
+                afZeroVelocity()
+                afCorrect = false
             end
         end)
     end
 
-    player.CharacterAdded:Connect(function()
-        safePosition=nil; lastSafeSave=0; resetState()
-        if antiFlingEnabled then task.wait(0.6); enableAntiFling() end
+    local function afTeleportToAnchor()
+        if afAnchorPart and afRoot then
+            afRoot.CFrame = afAnchorPart.CFrame * CFrame.new(-AF.AnchorOffset)
+            afZeroVelocity()
+        end
+    end
+
+    local function afTeleportToSafe()
+        if afRoot then
+            afRoot.CFrame = afSafeCF
+            afZeroVelocity()
+        end
+    end
+
+    -- ---- Suppression entry point ----
+    local function afSuppress(reason, detail)
+        if not antiFlingActive then return end
+        local now = tick()
+        LOG("ANTIFLING", reason, detail)
+
+        -- Rate-limited WindUI notification
+        if (now - afLastNotify) >= AF.NotifyCooldown then
+            afLastNotify = now
+            WindUI:Notify({
+                Title  = "⚠️ Fling Blocked!",
+                Content= reason .. " — " .. detail,
+                Icon   = "shield",
+                Duration = 3,
+            })
+        end
+
+        afCorrect = true
+
+        -- Immediate correction
+        afNukeMovers()
+        if AF.EnableAnchorTether and afAnchorPart then
+            afTeleportToAnchor()
+        else
+            afTeleportToSafe()
+        end
+
+        -- Humanoid state lock
+        if afHum then
+            pcall(function() afHum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,    false) end)
+            pcall(function() afHum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false) end)
+            pcall(function() afHum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+        end
+
+        -- Short anchor burst
+        afForceAnchorAndReset(AF.ForceAnchorDuration)
+
+        -- Anti-loop: track suppression frequency
+        table.insert(afSupHist, now)
+        while #afSupHist > 0 and afSupHist[1] < now - AF.SuppressionWindow do
+            table.remove(afSupHist, 1)
+        end
+        if #afSupHist >= AF.MaxSuppressionsPerWindow then
+            LOG("ANTIFLING", "Anti-loop triggered — extended anchor")
+            afSupHist = {}
+            afForceAnchorAndReset(1.0)
+        end
+
+        -- Restore humanoid states after anchor lifts
+        task.delay(AF.ForceAnchorDuration + 0.05, function()
+            if afHum then
+                pcall(function() afHum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,    true) end)
+                pcall(function() afHum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true) end)
+            end
+            -- Refresh safe references
+            if afRoot then
+                afSafeCF  = afRoot.CFrame
+                afPrevCF  = afRoot.CFrame
+                afPrevVel = afRoot.AssemblyLinearVelocity
+                if afAnchorPart then
+                    afAnchorPart.CFrame = afRoot.CFrame * CFrame.new(AF.AnchorOffset)
+                end
+            end
+            afCorrect = false
+        end)
+    end
+
+    -- ---- Stepped detection (pre-physics, main loop) ----
+    local function onAFStepped()
+        if not antiFlingActive or not afRoot or not afHum or afCorrect then return end
+        if _CBD_SelfImmune then return end
+        if afHum:GetState() == Enum.HumanoidStateType.Dead then return end
+
+        local vel    = afRoot.AssemblyLinearVelocity
+        local cf     = afRoot.CFrame
+        local pos    = cf.Position
+        local speed  = vel.Magnitude
+
+        -- 1. High velocity
+        if speed > AF.MaxSpeed then
+            afSuppress("High Velocity", math.floor(speed).." studs/s")
+            return
+        end
+
+        -- 2. Acceleration spike
+        local accel = (vel - afPrevVel).Magnitude
+        if accel > AF.MaxAcceleration then
+            afSuppress("Acceleration Spike", math.floor(accel).." studs/s²")
+            return
+        end
+
+        -- 3. CFrame jump (teleport / rapid position fling)
+        local dist = (pos - afPrevCF.Position).Magnitude
+        if dist > AF.MaxTeleportDistance then
+            afSuppress("CFrame Jump", math.floor(dist).." studs")
+            return
+        end
+
+        -- 4. Anchor tether
+        if AF.EnableAnchorTether and afAnchorPart then
+            local anchorDist = (pos - afAnchorPart.Position).Magnitude
+            if anchorDist > AF.MaxAnchorDistance then
+                afSuppress("Anchor Broken", math.floor(anchorDist).." studs")
+                return
+            end
+        end
+
+        -- 5. Vertical fling
+        local vertDelta = math.abs(pos.Y - afPrevCF.Position.Y)
+        if vertDelta > 20 then
+            afSuppress("Vertical Fling", math.floor(vertDelta).." studs")
+            return
+        end
+
+        -- 6. Rotational spin
+        local rot = afRoot.AssemblyAngularVelocity.Magnitude
+        if rot > 40 then
+            afSuppress("Rotational Spin", math.floor(rot).." rad/s")
+            return
+        end
+
+        -- No issues → update safe references and advance anchor
+        afSafeCF  = cf
+        afPrevVel = vel
+        afPrevCF  = cf
+        if afAnchorPart then
+            local isGrounded = afHum.FloorMaterial ~= Enum.Material.Air
+            if isGrounded then
+                afAnchorPart.CFrame = cf * CFrame.new(AF.AnchorOffset)
+            end
+        end
+    end
+
+    -- ---- Heartbeat backup (catches ultra-fast CFrame changes) ----
+    local function onAFHeartbeat()
+        if not antiFlingActive or not afRoot or not afHum or afCorrect then return end
+        if _CBD_SelfImmune then return end
+        if afHum:GetState() == Enum.HumanoidStateType.Dead then return end
+
+        local jump = (afRoot.Position - afPrevCF.Position).Magnitude
+        if jump > AF.RawFrameJump then
+            afSuppress("CFrame Teleport (HB)", math.floor(jump).." studs")
+            return
+        end
+        -- Keep PrevCF fresh for Heartbeat's own check
+        afPrevCF = afRoot.CFrame
+    end
+
+    -- ---- Character setup ----
+    local function afSetupCharacter(char)
+        -- Disconnect old connections
+        if afSteppedConn   then afSteppedConn:Disconnect();   afSteppedConn=nil   end
+        if afHeartbeatConn then afHeartbeatConn:Disconnect(); afHeartbeatConn=nil end
+        afDestroyAnchor()
+
+        afChar = char
+        afHum  = char:WaitForChild("Humanoid")
+        afRoot = char:WaitForChild("HumanoidRootPart")
+
+        afPrevVel = afRoot.AssemblyLinearVelocity
+        afPrevCF  = afRoot.CFrame
+        afSafeCF  = afRoot.CFrame
+        afCorrect = false
+        afSupHist = {}
+
+        if AF.EnableAnchorTether then
+            afCreateAnchor()
+        end
+
+        afSteppedConn   = RunService.Stepped:Connect(onAFStepped)
+        afHeartbeatConn = RunService.Heartbeat:Connect(onAFHeartbeat)
+
+        afHum.Died:Once(function()
+            if afSteppedConn   then afSteppedConn:Disconnect();   afSteppedConn=nil   end
+            if afHeartbeatConn then afHeartbeatConn:Disconnect(); afHeartbeatConn=nil end
+        end)
+    end
+
+    -- ---- Enable / Disable ----
+    local function enableAntiFling()
+        antiFlingActive = true
+        if player.Character then
+            afSetupCharacter(player.Character)
+        end
+    end
+
+    local function disableAntiFling()
+        antiFlingActive = false
+        if afSteppedConn   then afSteppedConn:Disconnect();   afSteppedConn=nil   end
+        if afHeartbeatConn then afHeartbeatConn:Disconnect(); afHeartbeatConn=nil end
+        afDestroyAnchor()
+        afCorrect = false
+        afSupHist = {}
+    end
+
+    -- Re-setup on respawn (only if already enabled)
+    player.CharacterAdded:Connect(function(char)
+        if antiFlingActive then
+            task.wait(0.6)
+            afSetupCharacter(char)
+        end
     end)
 
+    -- ---- Toggle (exposed as module-level for applyPremium) ----
     antiFlingToggle = AntiFlingSection:Toggle({
-        Title="👑 Anti-Fling",
-        Desc="Aggressively blocks fling attempts by suppressing velocity every frame for half a second.",
-        Value=false, Locked=true, LockedTitle="Upgrade to Premium at pandauth.com to access Anti-Fling.",
-        Callback=function(state)
+        Title       = "👑 Anti-Fling",
+        Desc        = "Multi-stage fling detection: velocity, acceleration, CFrame jumps, anchor tether, vertical launches, and rotational spin.",
+        Value       = false,
+        Locked      = true,
+        LockedTitle = "Upgrade to Premium at pandauth.com to access Anti-Fling.",
+        Callback    = function(state)
             if not isPremium then
                 WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 }); return
             end
             if state then
-                if not antiFlingWarningAcknowledged then
-                    if antiFlingToggleRef then pcall(function() antiFlingToggleRef:Set(false) end) end
-                    antiFlingWarningAcknowledged=true
+                if not antiFlingWarned then
+                    if antiFlingToggle then pcall(function() antiFlingToggle:Set(false) end) end
+                    antiFlingWarned = true
                     WindUI:Popup({
                         Title="⚠️ Anti-Fling Info", Icon="alert-triangle",
-                        Content="Anti-Fling detects velocity spikes and aggressively suppresses them every frame for 0.6s — zeroing all velocities, destroying injected force objects, and pinning your position. Controls return immediately after.",
+                        Content="Anti-Fling uses multi-stage detection (velocity spikes, acceleration bursts, CFrame jumps, rotational spin, vertical launches) and an anchor tether to snap you back. Controls return immediately after each suppression window.",
                         Buttons={
-                            { Title="Cancel", Variant="Tertiary", Callback=function() antiFlingWarningAcknowledged=false; antiFlingEnabled=false; WindUI:Notify({ Title="Anti-Fling", Content="Cancelled.", Icon="x-circle", Duration=2 }) end },
+                            { Title="Cancel", Variant="Tertiary", Callback=function()
+                                antiFlingWarned = false
+                                WindUI:Notify({ Title="Anti-Fling", Content="Cancelled.", Icon="x-circle", Duration=2 })
+                            end },
                             { Title="I Understand", Icon="check", Variant="Primary", Callback=function()
-                                if antiFlingToggleRef then pcall(function() antiFlingToggleRef:Set(true) end) end
+                                if antiFlingToggle then pcall(function() antiFlingToggle:Set(true) end) end
                                 enableAntiFling()
-                                WindUI:Notify({ Title="Anti-Fling", Content="Fling protection active.", Icon="shield", Duration=3 })
+                                WindUI:Notify({ Title="Anti-Fling", Content="Multi-stage fling protection active.", Icon="shield", Duration=3 })
                             end },
                         },
                     })
                 else
                     enableAntiFling()
-                    WindUI:Notify({ Title="Anti-Fling", Content="Fling protection active.", Icon="shield", Duration=3 })
+                    WindUI:Notify({ Title="Anti-Fling", Content="Multi-stage fling protection active.", Icon="shield", Duration=3 })
                 end
             else
                 disableAntiFling()
@@ -1944,11 +2262,49 @@ do
             end
         end,
     })
-    antiFlingToggleRef = antiFlingToggle
 
-    AntiFlingSection:Slider({ Title="Velocity Threshold", Desc="Horizontal studs/s to trigger fling detection (lower = more sensitive)", Step=5, Value={Min=30,Max=300,Default=75}, Callback=function(v) VELOCITY_THRESHOLD=v end })
-    AntiFlingSection:Slider({ Title="Suppress Duration (0.1s steps)", Desc="How many frames to aggressively lock position after a fling (higher = stronger block)", Step=1, Value={Min=2,Max=20,Default=6}, Callback=function(v) SUPPRESS_DURATION=v/10 end })
-    AntiFlingSection:Slider({ Title="Notify Cooldown (s)", Desc="Minimum seconds between fling-detected notifications", Step=1, Value={Min=1,Max=10,Default=2}, Callback=function(v) NOTIFY_COOLDOWN=v end })
+    -- ---- Sliders (feed directly into AF config table) ----
+    AntiFlingSection:Slider({
+        Title="Max Speed Threshold",
+        Desc="Horizontal studs/s that triggers high-velocity detection (lower = more sensitive)",
+        Step=10, Value={Min=50, Max=500, Default=150},
+        Callback=function(v) AF.MaxSpeed = v end,
+    })
+
+    AntiFlingSection:Slider({
+        Title="Max Acceleration Threshold",
+        Desc="studs/s² spike to trigger acceleration detection",
+        Step=25, Value={Min=100, Max=1000, Default=400},
+        Callback=function(v) AF.MaxAcceleration = v end,
+    })
+
+    AntiFlingSection:Slider({
+        Title="Suppress Duration (0.1s steps)",
+        Desc="How long to anchor your position after each fling event",
+        Step=1, Value={Min=1, Max=20, Default=3},
+        Callback=function(v) AF.ForceAnchorDuration = v / 10 end,
+    })
+
+    AntiFlingSection:Slider({
+        Title="Notify Cooldown (s)",
+        Desc="Minimum seconds between fling-detected notifications",
+        Step=1, Value={Min=1, Max=10, Default=3},
+        Callback=function(v) AF.NotifyCooldown = v end,
+    })
+
+    AntiFlingSection:Toggle({
+        Title="Anchor Tether",
+        Desc="Maintains an invisible anchor below you and teleports you back if you stray too far.",
+        Value=true,
+        Callback=function(state)
+            AF.EnableAnchorTether = state
+            if not state then
+                afDestroyAnchor()
+            elseif antiFlingActive and afRoot then
+                afCreateAnchor()
+            end
+        end,
+    })
 end
 
 Window:SelectTab(1)
