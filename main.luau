@@ -1,4 +1,4 @@
--- fixed animssss
+-- fixed anim AND ADDED WALK ONES
 
 -- ==================== SERVICES ====================
 local Players          = game:GetService("Players")
@@ -53,18 +53,17 @@ end
 -- ============================================================
 --  FORWARD DECLARATIONS
 -- ============================================================
-local modWatchToggle  = nil
-local antiFlingToggle = nil
-local v2SpeedToggle   = nil
-local animToggle      = nil   -- Animations enable toggle (premium)
-local animDropdown    = nil   -- Animations picker dropdown (premium)
-local Window          = nil
+local modWatchToggle   = nil
+local antiFlingToggle  = nil
+local v2SpeedToggle    = nil
+local animToggle       = nil   -- Dance animations enable toggle (premium)
+local animDropdown     = nil   -- Dance animations picker dropdown (premium)
+local walkAnimToggle   = nil   -- Walk animations enable toggle (premium)
+local walkAnimDropdown = nil   -- Walk animations picker dropdown (premium)
+local Window           = nil
 
 -- ============================================================
 --  GLOBAL IMMUNITY FLAG
---  Set this to true when CBD itself is doing something that
---  causes a deliberate velocity spike (fling attack, etc.)
---  so anti-fling ignores it.
 -- ============================================================
 local _CBD_SelfImmune = false
 local function withImmunity(fn)
@@ -129,11 +128,13 @@ local function applyPremium(value, source, expires)
     isPremium = value; keyExpiry = expires or "Never"
     LOG("PREMIUM","isPremium =", isPremium, "via", source, "expires =", keyExpiry)
     task.spawn(function() if isPremium then premiumTag() else freeTag() end end)
-    if modWatchToggle  then pcall(function() if isPremium then modWatchToggle:Unlock()  else modWatchToggle:Lock()  end end) end
-    if antiFlingToggle then pcall(function() if isPremium then antiFlingToggle:Unlock() else antiFlingToggle:Lock() end end) end
-    if v2SpeedToggle   then pcall(function() if isPremium then v2SpeedToggle:Unlock()   else v2SpeedToggle:Lock()   end end) end
-    if animToggle      then pcall(function() if isPremium then animToggle:Unlock()      else animToggle:Lock()      end end) end
-    if animDropdown    then pcall(function() if isPremium then animDropdown:Unlock()    else animDropdown:Lock()    end end) end
+    if modWatchToggle   then pcall(function() if isPremium then modWatchToggle:Unlock()   else modWatchToggle:Lock()   end end) end
+    if antiFlingToggle  then pcall(function() if isPremium then antiFlingToggle:Unlock()  else antiFlingToggle:Lock()  end end) end
+    if v2SpeedToggle    then pcall(function() if isPremium then v2SpeedToggle:Unlock()    else v2SpeedToggle:Lock()    end end) end
+    if animToggle       then pcall(function() if isPremium then animToggle:Unlock()       else animToggle:Lock()       end end) end
+    if animDropdown     then pcall(function() if isPremium then animDropdown:Unlock()     else animDropdown:Lock()     end end) end
+    if walkAnimToggle   then pcall(function() if isPremium then walkAnimToggle:Unlock()   else walkAnimToggle:Lock()   end end) end
+    if walkAnimDropdown then pcall(function() if isPremium then walkAnimDropdown:Unlock() else walkAnimDropdown:Lock() end end) end
     if isPremium then
         WindUI:Notify({ Title="⭐ Premium Active", Content="Premium features unlocked! Expires: "..keyExpiry, Icon="crown", Duration=6 })
     end
@@ -348,12 +349,13 @@ task.defer(function()
 end)
 
 -- ==================== TABS ====================
-local FlyTab      = Window:Tab({ Title="Fly",      Icon="plane"   })
-local SpeedTab    = Window:Tab({ Title="Speed",    Icon="zap"     })
-local NoclipTab   = Window:Tab({ Title="Noclip",   Icon="ghost"   })
-local TrollingTab = Window:Tab({ Title="Trolling", Icon="laugh"   })
-local TeleportTab = Window:Tab({ Title="Teleport", Icon="map-pin" })
-local MiscTab     = Window:Tab({ Title="Misc",     Icon="shield"  })
+local FlyTab      = Window:Tab({ Title="Fly",        Icon="plane"      })
+local SpeedTab    = Window:Tab({ Title="Speed",      Icon="zap"        })
+local NoclipTab   = Window:Tab({ Title="Noclip",     Icon="ghost"      })
+local TrollingTab = Window:Tab({ Title="Trolling",   Icon="laugh"      })
+local TeleportTab = Window:Tab({ Title="Teleport",   Icon="map-pin"    })
+local AnimTab     = Window:Tab({ Title="Animations", Icon="music"      })  -- NEW: before Misc
+local MiscTab     = Window:Tab({ Title="Misc",       Icon="shield"     })
 
 -- ============================================================
 --  SAFE CFRAME HELPER
@@ -919,18 +921,7 @@ do
 end
 
 -- ============================================================
---  TROLLING – Proximity Fling (SkidFling method — actually works)
---
---  LocalScript physics only affect your OWN character on the server.
---  To fling another player you must physically move YOUR root into
---  theirs with high velocity attached — this transfers momentum to
---  them via Roblox's physics engine (the original skid-fling method).
---
---  To prevent self-fling we:
---    1. Raise _CBD_SelfImmune the entire time so anti-fling ignores us.
---    2. Save our CFrame before starting and do a clean zero + teleport
---       back immediately after the BV is removed.
---    3. Use a tight time-limit (1.5s max) so we never stay flung.
+--  TROLLING – Proximity Fling
 -- ============================================================
 do
     local TrollingSection = TrollingTab:Section({ Title="Fling" })
@@ -951,7 +942,6 @@ do
         activeFlings[target.UserId] = true
 
         task.spawn(function()
-            -- Raise immunity FIRST — anti-fling will ignore us the whole time
             _CBD_SelfImmune = true
 
             local myChar = player.Character
@@ -972,31 +962,26 @@ do
                 return
             end
 
-            -- Snapshot our safe return position before anything moves
             local returnCF = myRoot.CFrame
-
-            -- Prevent FallenPartsDestroyHeight from deleting the target
             local origFPDH = workspace.FallenPartsDestroyHeight
             workspace.FallenPartsDestroyHeight = math.huge
 
-            -- Attach BodyVelocity to OUR root — this powers the momentum transfer
             local bv = Instance.new("BodyVelocity")
-            bv.Name     = "AirResistance"   -- whitelisted by anti-fling
+            bv.Name     = "AirResistance"
             bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
             bv.Velocity  = Vector3.new(9e8, 9e8, 9e8)
             bv.Parent   = myRoot
 
             myHum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
 
-            -- Oscillate into the target to transfer momentum via contact physics
             local TIME_LIMIT = 1.5
             local startTick  = tick()
             local angle      = 0
 
             local function fpos(base, offset, ang)
-                myRoot.CFrame    = CFrame.new(base.Position) * offset * ang
-                myRoot.Velocity          = Vector3.new(9e7, 9e7 * 10, 9e7)
-                myRoot.RotVelocity       = Vector3.new(9e8, 9e8, 9e8)
+                myRoot.CFrame          = CFrame.new(base.Position) * offset * ang
+                myRoot.Velocity        = Vector3.new(9e7, 9e7 * 10, 9e7)
+                myRoot.RotVelocity     = Vector3.new(9e8, 9e8, 9e8)
             end
 
             repeat
@@ -1022,12 +1007,10 @@ do
                 or myHum.Health <= 0
                 or tick() > startTick + TIME_LIMIT
 
-            -- Remove the BV immediately
             pcall(function() bv:Destroy() end)
             myHum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
             workspace.CurrentCamera.CameraSubject = myHum
 
-            -- Clean snap back: zero ALL velocity on every limb, then teleport
             if myChar then
                 for _, part in ipairs(myChar:GetDescendants()) do
                     if part:IsA("BasePart") then
@@ -1043,7 +1026,6 @@ do
 
             workspace.FallenPartsDestroyHeight = origFPDH
 
-            -- Small grace window then lift immunity
             task.wait(0.25)
             _CBD_SelfImmune = false
             activeFlings[target.UserId] = nil
@@ -1129,6 +1111,694 @@ do
 end
 
 -- ============================================================
+--  ANIMATIONS TAB
+-- ============================================================
+
+-- ============================================================
+--  WALK ANIMATIONS (PREMIUM)
+--
+--  Uses the Animate LocalScript method from the AnimationChanger
+--  reference script — modifies animation IDs directly on the
+--  character's Animate script, then forces a Jump to reload them.
+--  Works for: idle, walk, run, jump, fall, climb, swim.
+-- ============================================================
+do
+    local WalkAnimSection = AnimTab:Section({ Title="Walk Animations  •  👑 Premium" })
+
+    -- ── Walk animation packs ──────────────────────────────────
+    -- Each pack mirrors what the AnimationChanger script does.
+    -- Keys: idle1, idle2, walk, run, jump, fall, climb
+    -- (swimidle/swim are optional — added where the original has them)
+    local WALK_ANIM_PACKS = {
+        {
+            name = "Default (R15)",
+            idle1 = "507766388", idle2 = "507766666",
+            walk  = "507777826", run   = "507767714",
+            jump  = "507765000", fall  = "507767968", climb = "507765644",
+        },
+        {
+            name = "Ninja",
+            idle1 = "656117400", idle2 = "656118341",
+            walk  = "656121766", run   = "656118852",
+            jump  = "656117878", fall  = "656115606", climb = "656114359",
+        },
+        {
+            name = "Levitation",
+            idle1 = "616006778", idle2 = "616008087",
+            walk  = "616013216", run   = "616010382",
+            jump  = "616008936", fall  = "616005863", climb = "616003713",
+        },
+        {
+            name = "Stylish",
+            idle1 = "616136790", idle2 = "616138447",
+            walk  = "616146177", run   = "616140816",
+            jump  = "616139451", fall  = "616134815", climb = "616133594",
+        },
+        {
+            name = "Robot",
+            idle1 = "616088211", idle2 = "616089559",
+            walk  = "616095330", run   = "616091570",
+            jump  = "616090535", fall  = "616087089", climb = "616086039",
+        },
+        {
+            name = "Zombie",
+            idle1 = "616158929", idle2 = "616160636",
+            walk  = "616168032", run   = "616163682",
+            jump  = "616161997", fall  = "616157476", climb = "616156119",
+        },
+        {
+            name = "Cartoony",
+            idle1 = "742637544", idle2 = "742638445",
+            walk  = "742640026", run   = "742638842",
+            jump  = "742637942", fall  = "742637151", climb = "742636889",
+        },
+        {
+            name = "Knight",
+            idle1 = "657595757", idle2 = "657568135",
+            walk  = "657552124", run   = "657564596",
+            jump  = "658409194", fall  = "657600338", climb = "658360781",
+        },
+        {
+            name = "Superhero",
+            idle1 = "616111295", idle2 = "616113536",
+            walk  = "616122287", run   = "616117076",
+            jump  = "616115533", fall  = "616108001", climb = "616104706",
+        },
+        {
+            name = "Mage",
+            idle1 = "707742142", idle2 = "707855907",
+            walk  = "707897309", run   = "707861613",
+            jump  = "707853694", fall  = "707829716", climb = "707826056",
+        },
+        {
+            name = "Vampire",
+            idle1 = "1083445855", idle2 = "1083450166",
+            walk  = "1083473930", run   = "1083462077",
+            jump  = "1083455352", fall  = "1083443587", climb = "1083439238",
+        },
+        {
+            name = "Werewolf",
+            idle1 = "1083195517", idle2 = "1083214717",
+            walk  = "1083178339", run   = "1083216690",
+            jump  = "1083218792", fall  = "1083189019", climb = "1083182000",
+        },
+        {
+            name = "Pirate",
+            idle1 = "750781874", idle2 = "750782770",
+            walk  = "750785693", run   = "750783738",
+            jump  = "750782230", fall  = "750780242", climb = "750779899",
+        },
+        {
+            name = "Astronaut",
+            idle1 = "891621366", idle2 = "891633237",
+            walk  = "891667138", run   = "891636393",
+            jump  = "891627522", fall  = "891617961", climb = "891609353",
+        },
+        {
+            name = "Elder",
+            idle1 = "845397899", idle2 = "845400520",
+            walk  = "845403856", run   = "845386501",
+            jump  = "845398858", fall  = "845396048", climb = "845392038",
+        },
+        {
+            name = "Toy",
+            idle1 = "782841498", idle2 = "782845736",
+            walk  = "782843345", run   = "782842708",
+            jump  = "782847020", fall  = "782846423", climb = "782843869",
+        },
+        {
+            name = "Bubbly",
+            idle1 = "910004836", idle2 = "910009958",
+            walk  = "910034870", run   = "910025107",
+            jump  = "910016857", fall  = "910001910", climb = "910034870",
+        },
+        {
+            name = "Patrol",
+            idle1 = "1149612882", idle2 = "1150842221",
+            walk  = "1151231493", run   = "1150967949",
+            jump  = "1148811837", fall  = "1148863382", climb = "1148811837",
+        },
+        {
+            name = "Confident",
+            idle1 = "1069977950", idle2 = "1069987858",
+            walk  = "1070017263", run   = "1070001516",
+            jump  = "1069984524", fall  = "1069973677", climb = "1069946257",
+        },
+        {
+            name = "Cowboy",
+            idle1 = "1014390418", idle2 = "1014398616",
+            walk  = "1014421541", run   = "1014401683",
+            jump  = "1014394726", fall  = "1014384571", climb = "1014380606",
+        },
+        {
+            name = "Sneaky",
+            idle1 = "1132473842", idle2 = "1132477671",
+            walk  = "1132510133", run   = "1132494274",
+            jump  = "1132489853", fall  = "1132469004", climb = "1132461372",
+        },
+        {
+            name = "Princess",
+            idle1 = "941003647", idle2 = "941013098",
+            walk  = "941028902", run   = "941015281",
+            jump  = "941008832", fall  = "941000007", climb = "940996062",
+        },
+        {
+            name = "Popstar",
+            idle1 = "1212900985", idle2 = "1150842221",
+            walk  = "1212980338", run   = "1212980348",
+            jump  = "1212954642", fall  = "1212900995", climb = "1213044953",
+        },
+        {
+            name = "Ghost",
+            idle1 = "616006778", idle2 = "616008087",
+            walk  = "616013216", run   = "616013216",
+            jump  = "616008936", fall  = "616005863", climb = "616003713",
+        },
+        {
+            name = "Anthro (Default)",
+            idle1 = "2510196951", idle2 = "2510197257",
+            walk  = "2510202577", run   = "2510198475",
+            jump  = "2510197830", fall  = "2510195892", climb = "2510192778",
+        },
+        {
+            name = "None (Invisible)",
+            idle1 = "0", idle2 = "0",
+            walk  = "0", run   = "0",
+            jump  = "0", fall  = "0", climb = "0",
+        },
+    }
+
+    -- ── State ────────────────────────────────────────────────
+    local walkAnimEnabled     = false
+    local currentWalkPackName = nil
+
+    -- Build dropdown list
+    local walkDropOptions = {}
+    local walkPackByName  = {}
+    for _, pack in ipairs(WALK_ANIM_PACKS) do
+        table.insert(walkDropOptions, pack.name)
+        walkPackByName[pack.name] = pack
+    end
+
+    -- ── Core apply function ───────────────────────────────────
+    -- Directly patches the Animate LocalScript exactly like the
+    -- AnimationChanger reference script does, then forces a Jump.
+    local function applyWalkPack(pack)
+        local char = player.Character
+        if not char then return end
+        local animate = char:FindFirstChild("Animate")
+        if not animate then
+            WindUI:Notify({ Title="Walk Animations", Content="Animate script not found on character.", Icon="alert-circle", Duration=3 })
+            return
+        end
+
+        local BASE = "http://www.roblox.com/asset/?id="
+
+        -- idle
+        local idleFolder = animate:FindFirstChild("idle")
+        if idleFolder then
+            local a1 = idleFolder:FindFirstChild("Animation1")
+            local a2 = idleFolder:FindFirstChild("Animation2")
+            if a1 then a1.AnimationId = BASE .. pack.idle1 end
+            if a2 then a2.AnimationId = BASE .. pack.idle2 end
+        end
+
+        -- walk
+        local walkFolder = animate:FindFirstChild("walk")
+        if walkFolder then
+            local wa = walkFolder:FindFirstChild("WalkAnim")
+            if wa then wa.AnimationId = BASE .. pack.walk end
+        end
+
+        -- run
+        local runFolder = animate:FindFirstChild("run")
+        if runFolder then
+            local ra = runFolder:FindFirstChild("RunAnim")
+            if ra then ra.AnimationId = BASE .. pack.run end
+        end
+
+        -- jump
+        local jumpFolder = animate:FindFirstChild("jump")
+        if jumpFolder then
+            local ja = jumpFolder:FindFirstChild("JumpAnim")
+            if ja then ja.AnimationId = BASE .. pack.jump end
+        end
+
+        -- fall
+        local fallFolder = animate:FindFirstChild("fall")
+        if fallFolder then
+            local fa = fallFolder:FindFirstChild("FallAnim")
+            if fa then fa.AnimationId = BASE .. pack.fall end
+        end
+
+        -- climb
+        local climbFolder = animate:FindFirstChild("climb")
+        if climbFolder then
+            local ca = climbFolder:FindFirstChild("ClimbAnim")
+            if ca then ca.AnimationId = BASE .. pack.climb end
+        end
+
+        -- Force Roblox to reload the animations immediately
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.Jump = true end
+
+        LOG("WALKANIM", "Applied pack:", pack.name)
+    end
+
+    local function resetWalkAnimations()
+        -- Restore default R15 animations
+        local defaultPack = walkPackByName["Default (R15)"]
+        if defaultPack then applyWalkPack(defaultPack) end
+        currentWalkPackName = nil
+    end
+
+    -- Re-apply on respawn
+    player.CharacterAdded:Connect(function()
+        if walkAnimEnabled and currentWalkPackName then
+            task.wait(1)  -- wait for Animate script to load
+            local pack = walkPackByName[currentWalkPackName]
+            if pack then applyWalkPack(pack) end
+        end
+    end)
+
+    -- ── UI ────────────────────────────────────────────────────
+    walkAnimToggle = WalkAnimSection:Toggle({
+        Title   = "👑 Enable Walk Animations",
+        Desc    = "Change your character's movement animations. Visible to everyone.",
+        Value   = false,
+        Locked  = true,
+        LockedTitle = "Upgrade to Premium at pandauth.com to access Walk Animations.",
+        Callback = function(state)
+            if not isPremium then
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                return
+            end
+            walkAnimEnabled = state
+            if not state then
+                resetWalkAnimations()
+                WindUI:Notify({ Title="Walk Animations", Content="Animations reset to default.", Icon="rotate-ccw", Duration=2 })
+            else
+                WindUI:Notify({ Title="Walk Animations", Content="Pick a style from the dropdown below.", Icon="footprints", Duration=3 })
+            end
+        end,
+    })
+
+    walkAnimDropdown = WalkAnimSection:Dropdown({
+        Title   = "👑 Walk Style",
+        Desc    = "Choose a walk/run/idle animation pack.",
+        List    = walkDropOptions,
+        Locked  = true,
+        LockedTitle = "Upgrade to Premium at pandauth.com.",
+        Callback = function(selected)
+            if not isPremium then
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                return
+            end
+            if not walkAnimEnabled then
+                WindUI:Notify({ Title="Walk Animations", Content="Enable Walk Animations first with the toggle above.", Icon="alert-circle", Duration=3 })
+                return
+            end
+            local pack = walkPackByName[selected]
+            if not pack then return end
+            currentWalkPackName = selected
+            applyWalkPack(pack)
+            WindUI:Notify({ Title="Walk Style", Content="Applied: " .. selected, Icon="footprints", Duration=2 })
+        end,
+    })
+
+    WalkAnimSection:Button({
+        Title    = "Reset to Default",
+        Desc     = "Restore the original R15 walk animations.",
+        Icon     = "rotate-ccw",
+        Callback = function()
+            resetWalkAnimations()
+            WindUI:Notify({ Title="Walk Animations", Content="Reset to default R15 animations.", Icon="rotate-ccw", Duration=2 })
+        end,
+    })
+end
+
+-- ============================================================
+--  DANCE ANIMATIONS (PREMIUM)
+-- ============================================================
+do
+    local AnimSection = AnimTab:Section({ Title="Dance Animations  •  👑 Premium" })
+
+    -- ── Animation list ────────────────────────────────────────
+    local ANIMATION_LIST = {
+        { id=10714390497, name="Robot Dance"        },
+        { id=10713962506, name="Floss"              },
+        { id=14899979575, name="Griddy"             },
+        { id=16572740012, name="GTA Victory"        },
+        { id=18443237526, name="Shoot Dance"        },
+        { id=15679621440, name="Renegade"           },
+        { id=4940563117,  name="Nae Nae"            },
+        { id=14352362059, name="Thriller"           },
+        { id=18665811005, name="Woah"               },
+        { id=10714360343, name="Orange Justice"     },
+        { id=10214319518, name="Dab"                },
+        { id=15963314052, name="Sussy Walk"         },
+        { id=10714016223, name="Wiggle"             },
+        { id=11309255148, name="JuJu"               },
+        { id=16126469463, name="Samba"              },
+        { id=15505459811, name="Carlton"            },
+        { id=16256203246, name="Moonwalk"           },
+        { id=10714378156, name="Wave"               },
+        { id=10370362157, name="Worm"               },
+        { id=15122972413, name="Running Man"        },
+        { id=18524313628, name="Hit Dem Folks"      },
+        { id=12507085924, name="Gangnam Style"      },
+        { id=10714330764, name="Twerk"              },
+        { id=11444441914, name="Milly Rock"         },
+        { id=17748314784, name="Crip Walk"          },
+        { id=10713954623, name="John Travolta"      },
+        { id=18526288497, name="Turbo"              },
+        { id=10714345862, name="Shuffle"            },
+        { id=10214311282, name="Salute"             },
+        { id=10714336041, name="Happy"              },
+        { id=17360699557, name="Electro Shuffle"    },
+        { id=17000021306, name="Anime Dance"        },
+        { id=14352343065, name="Macarena"           },
+        { id=10714342957, name="Whip"               },
+        { id=10714388352, name="Dances"             },
+        { id=16584481352, name="Cat Walk"           },
+        { id=12992262118, name="Herobrine"          },
+        { id=10714392151, name="Raise the Roof"     },
+        { id=11753474067, name="Hype"               },
+        { id=10717116749, name="Pony"               },
+        { id=14899980745, name="Disco Fever"        },
+        { id=15698402762, name="Sig Sauer"          },
+        { id=10714068222, name="Swing"              },
+        { id=15609995579, name="Uno Reverse"        },
+        { id=10714101749, name="Breakdance"         },
+        { id=14352337694, name="Twist"              },
+        { id=5895324424,  name="Sprinkler"          },
+        { id=10713981723, name="Slide"              },
+        { id=10478338114, name="Spin"               },
+        { id=16553163212, name="Ymca"               },
+        { id=15571453761, name="Pop Lock"           },
+        { id=10714366910, name="Lasso"              },
+        { id=10714375667, name="Whip Nae Nae"       },
+        { id=10714100539, name="Running Man 2"      },
+        { id=10714374267, name="Tootsee Roll"       },
+        { id=10714372526, name="Cabbage Patch"      },
+        { id=15698404340, name="Reload"             },
+        { id=14352340648, name="Charleston"         },
+        { id=12507084541, name="Bankroll"           },
+        { id=15392752812, name="Bop"                },
+        { id=15505456446, name="Cha Cha Slide"      },
+        { id=10714352930, name="Bounce"             },
+        { id=10714065135, name="Squat Kick"         },
+        { id=10713990381, name="Dip"                },
+        { id=10714349037, name="Jump"               },
+        { id=16646423316, name="Knife Party"        },
+        { id=15517864808, name="Dab Walk"           },
+        { id=15693621070, name="Get Freaky"         },
+        { id=15689279687, name="Disco"              },
+        { id=17746180844, name="Skibidi"            },
+        { id=11394033602, name="Pon Pon"            },
+        { id=10714345459, name="Crank"              },
+        { id=10714386947, name="Hit Dem"            },
+        { id=10714352626, name="Dances 2"           },
+        { id=10714395175, name="Robot 2"            },
+        { id=10713983178, name="Crocodile"          },
+        { id=10714347453, name="Step"               },
+        { id=10714389396, name="Spin Kick"          },
+        { id=10214314957, name="Point"              },
+        { id=15549124879, name="Mannequin"          },
+        { id=10714340543, name="Old Spice"          },
+        { id=10714369325, name="Swag"               },
+        { id=10714069471, name="Lean"               },
+        { id=14022936101, name="Street Dance"       },
+        { id=16392075853, name="Sway"               },
+        { id=10714089137, name="Anime Dance 2"      },
+        { id=14024642130, name="Drill"              },
+        { id=10714362852, name="Shimmy"             },
+        { id=10714003221, name="Idle Bounce"        },
+        { id=10714360164, name="Cheer"              },
+        { id=16270690701, name="Fancy Footwork"     },
+        { id=10370346995, name="Trot"               },
+        { id=6862001787,  name="Blox Step"          },
+        { id=10370351535, name="March"              },
+        { id=18148804340, name="Cyber"              },
+        { id=15392756794, name="Pop"                },
+        { id=15689278184, name="Shoot"              },
+        { id=10714061912, name="Clap"               },
+        { id=10714293450, name="Shrug"              },
+        { id=10713984554, name="Arms Cross"         },
+        { id=10713957138, name="Bow"                },
+        { id=10714382225, name="Salsa"              },
+        { id=10714072822, name="Head Bang"          },
+        { id=10714340558, name="Guitar"             },
+        { id=10714393929, name="Air Guitar"         },
+        { id=10713968716, name="Sit"                },
+        { id=10714074218, name="Lean Back"          },
+        { id=10714347256, name="Pushup"             },
+        { id=16272432203, name="Power Up"           },
+        { id=10714358528, name="Sleep"              },
+        { id=10713992055, name="Laugh"              },
+        { id=10714394082, name="Cry"                },
+        { id=10714392953, name="Confused"           },
+        { id=10714391240, name="Think"              },
+        { id=10714383856, name="Sigh"               },
+        { id=16215030041, name="Taunt"              },
+        { id=15392759696, name="Victory"            },
+        { id=12507083048, name="Thumbs Up"          },
+        { id=12259826609, name="Thumbs Down"        },
+        { id=16302968986, name="OK Sign"            },
+        { id=4940561610,  name="Peace"              },
+        { id=15517862739, name="Flex"               },
+        { id=10214317325, name="Facepalm"           },
+        { id=10275008655, name="Shiver"             },
+        { id=10714371274, name="Cringe"             },
+        { id=10713988674, name="Nervous"            },
+        { id=10714066964, name="Shocked"            },
+        { id=12259825026, name="Angry"              },
+        { id=11453082181, name="Scared"             },
+        { id=10714350889, name="Dizzy"              },
+        { id=10370353969, name="Tired"              },
+        { id=18225053113, name="Yawn"               },
+        { id=13823324057, name="Sneeze"             },
+        { id=11444443576, name="Cough"              },
+        { id=10714392876, name="Idle Lean"          },
+        { id=10714164866, name="Idle Scratch"       },
+        { id=10714382522, name="Idle Look"          },
+        { id=10714349738, name="Idle Stretch"       },
+        { id=17370775305, name="Idle Tap"           },
+        { id=10714076981, name="Idle Whistle"       },
+        { id=10714365721, name="Idle Hum"           },
+        { id=15505454268, name="Idle Clap"          },
+        { id=15505458452, name="Idle Rock"          },
+        { id=10714361543, name="Idle Pose"          },
+        { id=10714364213, name="Idle Freeze"        },
+        { id=10714022275, name="Idle Look Around"   },
+        { id=10714174918, name="Idle Sway"          },
+        { id=12804157977, name="Idle Bored"         },
+        { id=10714063823, name="Idle Fidget"        },
+        { id=10714070681, name="Idle Check Watch"   },
+        { id=14352335202, name="Phone"              },
+        { id=10714380563, name="Type"               },
+        { id=18526362841, name="Read"               },
+        { id=10714403700, name="Cook"               },
+        { id=10714377090, name="Eat"                },
+        { id=10714168145, name="Drink"              },
+        { id=10714389988, name="Drive"              },
+        { id=10714338461, name="Rowing"             },
+        { id=10713966026, name="Swim"               },
+        { id=10714395441, name="Run Alt"            },
+        { id=10714374484, name="Walk Alt"           },
+        { id=10714359093, name="Jump Alt"           },
+        { id=10714356920, name="Fall Alt"           },
+    }
+
+    -- ── State ─────────────────────────────────────────────────
+    local animEnabled      = false
+    local currentTrack     = nil
+    local currentAnimId    = nil
+    local animSpeed        = 1
+    local animLooped       = true
+    local animSpeedConn    = nil
+
+    -- ── Helpers ───────────────────────────────────────────────
+    local function getDanceHum()
+        local c = player.Character
+        return c and c:FindFirstChildOfClass("Humanoid")
+    end
+
+    local function stopAnimation()
+        if currentTrack then
+            pcall(function() currentTrack:Stop() end)
+            pcall(function() currentTrack:Destroy() end)
+            currentTrack = nil
+        end
+        if animSpeedConn then animSpeedConn:Disconnect(); animSpeedConn = nil end
+    end
+
+    local function stopAllAnimations()
+        local hum = getDanceHum()
+        if not hum then return end
+        stopAnimation()
+        for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+            pcall(function() track:Stop() end)
+        end
+        WindUI:Notify({ Title="Dance Animations", Content="All animations stopped.", Icon="square", Duration=2 })
+    end
+
+    local function playAnimation(id)
+        if not isPremium then return end
+        local hum = getDanceHum()
+        if not hum then
+            WindUI:Notify({ Title="Dance Animations", Content="No humanoid found.", Icon="alert-circle", Duration=3 })
+            return
+        end
+        stopAnimation()
+        currentAnimId = id
+        local anim = Instance.new("Animation")
+        anim.AnimationId = "rbxassetid://" .. tostring(id)
+        local ok, track = pcall(function() return hum:LoadAnimation(anim) end)
+        anim:Destroy()
+        if not ok or not track then
+            WindUI:Notify({ Title="Dance Animations", Content="Failed to load animation "..id, Icon="alert-circle", Duration=3 })
+            return
+        end
+        currentTrack        = track
+        currentTrack.Looped = animLooped
+        currentTrack:Play()
+        currentTrack:AdjustSpeed(animSpeed)
+        animSpeedConn = RunService.Heartbeat:Connect(function()
+            if currentTrack and currentTrack.IsPlaying then
+                pcall(function() currentTrack:AdjustSpeed(animSpeed) end)
+            end
+        end)
+    end
+
+    player.CharacterAdded:Connect(function()
+        currentTrack  = nil
+        animSpeedConn = nil
+        if animEnabled and currentAnimId then
+            task.wait(1)
+            playAnimation(currentAnimId)
+        end
+    end)
+
+    -- ── Build dropdown options ─────────────────────────────────
+    -- Build the flat list of names in order — this is what WindUI
+    -- will show in the dropdown, and since we keep the ANIMATION_LIST
+    -- order the indices match perfectly for the lookup below.
+    local dropdownOptions = {}
+    for _, entry in ipairs(ANIMATION_LIST) do
+        table.insert(dropdownOptions, entry.name)
+    end
+
+    -- Fast name → id lookup table
+    local nameToId = {}
+    for _, entry in ipairs(ANIMATION_LIST) do
+        nameToId[entry.name] = entry.id
+    end
+
+    -- ── UI ────────────────────────────────────────────────────
+    animToggle = AnimSection:Toggle({
+        Title   = "👑 Enable Dance Animations",
+        Desc    = "Play dance/emote animations visible to everyone in the server.",
+        Value   = false,
+        Locked  = true,
+        LockedTitle = "Upgrade to Premium at pandauth.com to access Dance Animations.",
+        Callback = function(state)
+            if not isPremium then
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                return
+            end
+            animEnabled = state
+            if not state then
+                stopAllAnimations()
+            else
+                WindUI:Notify({ Title="Dance Animations", Content="Pick an animation from the dropdown below.", Icon="music", Duration=3 })
+            end
+        end,
+    })
+
+    -- The dropdown is built with the full dropdownOptions list so every
+    -- animation name appears in the picker exactly as written above.
+    animDropdown = AnimSection:Dropdown({
+        Title   = "👑 Pick Dance Animation",
+        Desc    = "Select a dance or emote to play. Visible to all players.",
+        List    = dropdownOptions,
+        Locked  = true,
+        LockedTitle = "Upgrade to Premium at pandauth.com.",
+        Callback = function(selected)
+            if not isPremium then
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                return
+            end
+            if not animEnabled then
+                WindUI:Notify({ Title="Dance Animations", Content="Enable Dance Animations first using the toggle above.", Icon="alert-circle", Duration=3 })
+                return
+            end
+            local id = nameToId[selected]
+            if not id then return end
+            playAnimation(id)
+            WindUI:Notify({ Title="▶ Playing", Content=selected, Icon="music", Duration=2 })
+        end,
+    })
+
+    AnimSection:Toggle({
+        Title   = "Loop Animation",
+        Desc    = "Whether the animation repeats automatically.",
+        Value   = true,
+        Callback = function(state)
+            animLooped = state
+            if currentTrack then
+                pcall(function() currentTrack.Looped = state end)
+            end
+        end,
+    })
+
+    AnimSection:Slider({
+        Title = "Animation Speed",
+        Desc  = "Playback speed multiplier (1 = normal).",
+        Step  = 0.1,
+        Value = { Min=0.1, Max=5, Default=1 },
+        Callback = function(v)
+            animSpeed = v
+            if currentTrack and currentTrack.IsPlaying then
+                pcall(function() currentTrack:AdjustSpeed(animSpeed) end)
+            end
+        end,
+    })
+
+    AnimSection:Button({
+        Title    = "Stop All Animations",
+        Desc     = "Immediately stops every playing animation.",
+        Icon     = "square",
+        Callback = function()
+            stopAllAnimations()
+        end,
+    })
+
+    AnimSection:Input({
+        Title       = "Custom Animation ID",
+        Desc        = "Enter any Roblox animation asset ID to play it.",
+        Placeholder = "e.g. 507770239",
+        Callback    = function(text)
+            if not isPremium then
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                return
+            end
+            if not animEnabled then
+                WindUI:Notify({ Title="Dance Animations", Content="Enable Dance Animations first.", Icon="alert-circle", Duration=3 })
+                return
+            end
+            local id = tonumber(text)
+            if not id then
+                WindUI:Notify({ Title="Dance Animations", Content="Invalid ID — numbers only.", Icon="x-circle", Duration=3 })
+                return
+            end
+            playAnimation(id)
+            WindUI:Notify({ Title="▶ Custom", Content="Playing ID "..id, Icon="music", Duration=2 })
+        end,
+    })
+end
+
+-- ============================================================
 --  MISC – Moderation Watcher (PREMIUM)
 -- ============================================================
 do
@@ -1180,23 +1850,6 @@ end
 
 -- ============================================================
 --  MISC – Anti-Fling (PREMIUM)
---
---  FIXED:
---  • Respects _CBD_SelfImmune — if fling or any other CBD system
---    raises the flag, anti-fling does nothing that frame.
---  • Safe-position is only saved on the ground at calm speed.
---    It is NEVER overwritten while isFlung is true.
---  • When a fling spike is detected:
---      1. Send ONE WindUI warning with the speed that triggered it.
---      2. Destroy all foreign force objects on our root once.
---      3. Zero all assembly velocities once.
---      4. Teleport back to the saved safe position once.
---      5. Enter a "locked" state for RECOVER_GRACE seconds where
---         we suppress further teleports (prevents the stuck/delay
---         feeling from hammering CFrame every frame).
---      6. After the grace period, return to idle monitoring.
---  • Does NOT zero velocity every frame — that was the main cause
---    of the sticky/5-second-delay feeling.
 -- ============================================================
 do
     local AntiFlingSection = MiscTab:Section({ Title="Anti-Fling" })
@@ -1205,26 +1858,23 @@ do
     local antiFlingWarningAcknowledged = false
     local antiFlingToggleRef = nil
 
-    -- Thresholds (user-adjustable via sliders below)
-    local VELOCITY_THRESHOLD = 80   -- horizontal studs/s spike threshold
-    local ANGULAR_THRESHOLD  = 5    -- rad/s angular spike threshold
-    local RECOVER_GRACE      = 0.5  -- seconds to stay in "recovering" state before going idle
-    local NOTIFY_COOLDOWN    = 2    -- minimum seconds between fling-detected notifications
+    local VELOCITY_THRESHOLD = 80
+    local ANGULAR_THRESHOLD  = 5
+    local RECOVER_GRACE      = 0.5
+    local NOTIFY_COOLDOWN    = 2
 
-    -- State
-    local safePosition   = nil   -- last known good CFrame (ground + calm)
-    local isFlung        = false -- currently in a flung state?
-    local recoverTimer   = 0     -- counts up while recovering
-    local lastNotifyTick = 0     -- throttle repeated notifications
-    local hasRecovered   = false -- flag: have we done the one-shot response this fling?
+    local safePosition   = nil
+    local isFlung        = false
+    local recoverTimer   = 0
+    local lastNotifyTick = 0
+    local hasRecovered   = false
 
     local function getRoot() local c = player.Character; return c and c:FindFirstChild("HumanoidRootPart") end
     local function getHum()  local c = player.Character; return c and c:FindFirstChildOfClass("Humanoid") end
 
-    -- Remove only genuinely foreign force objects (not our own named CBD movers)
     local CBD_OWN_NAMES = {
-        AirResistance = true,  -- Fly V1 BodyVelocity
-        Stabilizer    = true,  -- Fly V1 BodyGyro
+        AirResistance = true,
+        Stabilizer    = true,
     }
 
     local function destroyForeignMovers()
@@ -1243,9 +1893,7 @@ do
         end
     end
 
-    -- ONE-SHOT response: called exactly once per fling event
     local function respondToFling(root, hum, horizMag)
-        -- 1. Notification with speed info
         local now = tick()
         if (now - lastNotifyTick) >= NOTIFY_COOLDOWN then
             lastNotifyTick = now
@@ -1256,11 +1904,7 @@ do
                 Duration = 4,
             })
         end
-
-        -- 2. Kill foreign movers
         destroyForeignMovers()
-
-        -- 3. Zero all velocities on every body part (once)
         local char = player.Character
         if char then
             for _, part in ipairs(char:GetDescendants()) do
@@ -1270,17 +1914,12 @@ do
                 end
             end
         end
-
-        -- 4. Teleport back to safe position
         if safePosition and root and root.Parent then
             root.CFrame = safePosition
         end
-
-        -- 5. Pull humanoid out of physics/ragdoll
         if hum then
             pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
         end
-
         LOG("ANTIFLING", "One-shot response done. horizMag=" .. string.format("%.1f", horizMag))
     end
 
@@ -1303,8 +1942,6 @@ do
 
         antiFlingConn = RunService.Stepped:Connect(function(_, dt)
             if not antiFlingEnabled then return end
-
-            -- Immunity: CBD is deliberately doing something (fling attack etc.)
             if _CBD_SelfImmune then return end
 
             local root = getRoot()
@@ -1316,7 +1953,6 @@ do
             local horizMag = Vector3.new(linVel.X, 0, linVel.Z).Magnitude
             local angMag   = angVel.Magnitude
 
-            -- Only update the safe position when we are calm AND on the ground
             local isGrounded = (hum.FloorMaterial ~= Enum.Material.Air)
             if not isFlung and isGrounded and horizMag < (VELOCITY_THRESHOLD * 0.4) then
                 safePosition = root.CFrame
@@ -1325,7 +1961,6 @@ do
             local spikeDetected = (horizMag > VELOCITY_THRESHOLD) or (angMag > ANGULAR_THRESHOLD)
 
             if not isFlung then
-                -- IDLE: watching for a spike
                 if spikeDetected then
                     isFlung      = true
                     recoverTimer = 0
@@ -1333,27 +1968,19 @@ do
                     LOG("ANTIFLING", "Spike! horizMag=" .. string.format("%.1f", horizMag) .. " angMag=" .. string.format("%.2f", angMag))
                 end
             else
-                -- FLUNG STATE
                 if not hasRecovered then
-                    -- Fire the one-shot response exactly once
                     hasRecovered = true
                     respondToFling(root, hum, horizMag)
                 end
-
-                -- Count up calm time
                 if not spikeDetected then
                     recoverTimer = recoverTimer + dt
                 end
-
-                -- Once velocity has been calm for RECOVER_GRACE seconds, go idle
                 if recoverTimer >= RECOVER_GRACE then
                     isFlung      = false
                     recoverTimer = 0
                     hasRecovered = false
                     LOG("ANTIFLING", "Stable — returning to idle watch")
                 end
-                -- (If still spiking after the one-shot, we don't hammer CFrame again.
-                --  recoverTimer just stays at 0 until velocity calms down.)
             end
         end)
     end
@@ -1423,377 +2050,6 @@ do
         Desc="Minimum seconds between fling-detected notifications",
         Step=1, Value={Min=1, Max=10, Default=2},
         Callback=function(v) NOTIFY_COOLDOWN=v end
-    })
-end
-
--- ============================================================
---  MISC – Animations (PREMIUM)
---
---  Logic extracted from Zaya's Animation Gui.
---  Uses LoadAnimation on the local Humanoid — animations play
---  visibly to everyone in the server (replicated by Roblox).
---  No external GUI is created; everything lives in WindUI Misc tab.
--- ============================================================
-do
-    local AnimSection     = MiscTab:Section({ Title="Animations  •  👑 Premium" })
-
-    -- ── Animation list ──────────────────────────────────────────
-    -- Each entry: { id = number, name = string }
-    -- Add more rows here any time — the dropdown rebuilds itself.
-    local ANIMATION_LIST = {
-        { id=10714390497,      name="Robot Dance"          },
-        { id=10713962506,      name="Floss"                },
-        { id=14899979575,      name="Griddy"               },
-        { id=16572740012,      name="GTA Victory"          },
-        { id=18443237526,      name="Shoot Dance"          },
-        { id=15679621440,      name="Renegade"             },
-        { id=4940563117,       name="Nae Nae"              },
-        { id=14352362059,      name="Thriller"             },
-        { id=18665811005,      name="Woah"                 },
-        { id=10714360343,      name="Orange Justice"       },
-        { id=10214319518,      name="Dab"                  },
-        { id=15963314052,      name="Sussy Walk"           },
-        { id=10714016223,      name="Wiggle"               },
-        { id=11309255148,      name="JuJu"                 },
-        { id=16126469463,      name="Samba"                },
-        { id=15505459811,      name="Carlton"              },
-        { id=16256203246,      name="Moonwalk"             },
-        { id=10714378156,      name="Wave"                 },
-        { id=10370362157,      name="Worm"                 },
-        { id=15122972413,      name="Running Man"          },
-        { id=18524313628,      name="Hit Dem Folks"        },
-        { id=12507085924,      name="Gangnam Style"        },
-        { id=10714330764,      name="Twerk"                },
-        { id=11444441914,      name="Milly Rock"           },
-        { id=17748314784,      name="Crip Walk"            },
-        { id=10713954623,      name="John Travolta"        },
-        { id=18526288497,      name="Turbo"                },
-        { id=10714345862,      name="Shuffle"              },
-        { id=10214311282,      name="Salute"               },
-        { id=10714336041,      name="Happy"                },
-        { id=17360699557,      name="Electro Shuffle"      },
-        { id=17000021306,      name="Anime Dance"          },
-        { id=14352343065,      name="Macarena"             },
-        { id=10714342957,      name="Whip"                 },
-        { id=10714388352,      name="Dances"               },
-        { id=16584481352,      name="Cat Walk"             },
-        { id=12992262118,      name="Herobrine"            },
-        { id=10714392151,      name="Raise the Roof"       },
-        { id=11753474067,      name="Hype"                 },
-        { id=10717116749,      name="Pony"                 },
-        { id=14899980745,      name="Disco Fever"          },
-        { id=15698402762,      name="Sig Sauer"            },
-        { id=10714068222,      name="Swing"                },
-        { id=15609995579,      name="Uno Reverse"          },
-        { id=10714101749,      name="Breakdance"           },
-        { id=14352337694,      name="Twist"                },
-        { id=5895324424,       name="Sprinkler"            },
-        { id=10713981723,      name="Slide"                },
-        { id=10478338114,      name="Spin"                 },
-        { id=16553163212,      name="Ymca"                 },
-        { id=15571453761,      name="Pop Lock"             },
-        { id=10714366910,      name="Lasso"                },
-        { id=10714375667,      name="Whip Nae Nae"         },
-        { id=10714100539,      name="Running Man 2"        },
-        { id=10714374267,      name="Tootsee Roll"         },
-        { id=10714372526,      name="Cabbage Patch"        },
-        { id=15698404340,      name="Reload"               },
-        { id=14352340648,      name="Charleston"           },
-        { id=12507084541,      name="Bankroll"             },
-        { id=15392752812,      name="Bop"                  },
-        { id=15505456446,      name="Cha Cha Slide"        },
-        { id=10714352930,      name="Bounce"               },
-        { id=10714065135,      name="Squat Kick"           },
-        { id=10713990381,      name="Dip"                  },
-        { id=10714349037,      name="Jump"                 },
-        { id=16646423316,      name="Knife Party"          },
-        { id=15517864808,      name="Dab Walk"             },
-        { id=15693621070,      name="Get Freaky"           },
-        { id=15689279687,      name="Disco"                },
-        { id=17746180844,      name="Skibidi"              },
-        { id=11394033602,      name="Pon Pon"              },
-        { id=10714345459,      name="Crank"                },
-        { id=10714386947,      name="Hit Dem"              },
-        { id=10714352626,      name="Dances 2"             },
-        { id=10714395175,      name="Robot 2"              },
-        { id=10713983178,      name="Crocodile"            },
-        { id=10714347453,      name="Step"                 },
-        { id=10714389396,      name="Spin Kick"            },
-        { id=10214314957,      name="Point"                },
-        { id=15549124879,      name="Mannequin"            },
-        { id=10714340543,      name="Old Spice"            },
-        { id=10714369325,      name="Swag"                 },
-        { id=10714069471,      name="Lean"                 },
-        { id=14022936101,      name="Street Dance"         },
-        { id=16392075853,      name="Sway"                 },
-        { id=10714089137,      name="Anime Dance 2"        },
-        { id=14024642130,      name="Drill"                },
-        { id=10714362852,      name="Shimmy"               },
-        { id=10714003221,      name="Idle Bounce"          },
-        { id=10714360164,      name="Cheer"                },
-        { id=16270690701,      name="Fancy Footwork"       },
-        { id=10370346995,      name="Trot"                 },
-        { id=6862001787,       name="Blox Step"            },
-        { id=10370351535,      name="March"                },
-        { id=18148804340,      name="Cyber"                },
-        { id=15392756794,      name="Pop"                  },
-        { id=15689278184,      name="Shoot"                },
-        { id=10714061912,      name="Clap"                 },
-        { id=10714293450,      name="Shrug"                },
-        { id=10713984554,      name="Arms Cross"           },
-        { id=10713957138,      name="Bow"                  },
-        { id=10714382225,      name="Salsa"                },
-        { id=10714072822,      name="Head Bang"            },
-        { id=10714340558,      name="Guitar"               },
-        { id=10714393929,      name="Air Guitar"           },
-        { id=10713968716,      name="Sit"                  },
-        { id=10714074218,      name="Lean Back"            },
-        { id=10714347256,      name="Pushup"               },
-        { id=16272432203,      name="Power Up"             },
-        { id=10714358528,      name="Sleep"                },
-        { id=10713992055,      name="Laugh"                },
-        { id=10714394082,      name="Cry"                  },
-        { id=10714392953,      name="Confused"             },
-        { id=10714391240,      name="Think"                },
-        { id=10714383856,      name="Sigh"                 },
-        { id=16215030041,      name="Taunt"                },
-        { id=15392759696,      name="Victory"              },
-        { id=12507083048,      name="Thumbs Up"            },
-        { id=12259826609,      name="Thumbs Down"          },
-        { id=16302968986,      name="OK Sign"              },
-        { id=4940561610,       name="Peace"                },
-        { id=15517862739,      name="Flex"                 },
-        { id=10214317325,      name="Facepalm"             },
-        { id=10275008655,      name="Shiver"               },
-        { id=10714371274,      name="Cringe"               },
-        { id=10713988674,      name="Nervous"              },
-        { id=10714066964,      name="Shocked"              },
-        { id=12259825026,      name="Angry"                },
-        { id=11453082181,      name="Scared"               },
-        { id=10714350889,      name="Dizzy"                },
-        { id=10370353969,      name="Tired"                },
-        { id=18225053113,      name="Yawn"                 },
-        { id=13823324057,      name="Sneeze"               },
-        { id=11444443576,      name="Cough"                },
-        { id=10714392876,      name="Idle Lean"            },
-        { id=10714164866,      name="Idle Scratch"         },
-        { id=10714382522,      name="Idle Look"            },
-        { id=10714349738,      name="Idle Stretch"         },
-        { id=17370775305,      name="Idle Tap"             },
-        { id=10714076981,      name="Idle Whistle"         },
-        { id=10714365721,      name="Idle Hum"             },
-        { id=15505454268,      name="Idle Clap"            },
-        { id=15505458452,      name="Idle Rock"            },
-        { id=10714361543,      name="Idle Pose"            },
-        { id=10714364213,      name="Idle Freeze"          },
-        { id=10714022275,      name="Idle Look Around"     },
-        { id=10714174918,      name="Idle Sway"            },
-        { id=12804157977,      name="Idle Bored"           },
-        { id=10714063823,      name="Idle Fidget"          },
-        { id=10714070681,      name="Idle Check Watch"     },
-        { id=14352335202,      name="Phone"                },
-        { id=10714380563,      name="Type"                 },
-        { id=18526362841,      name="Read"                 },
-        { id=10714403700,      name="Cook"                 },
-        { id=10714377090,      name="Eat"                  },
-        { id=10714168145,      name="Drink"                },
-        { id=10714389988,      name="Drive"                },
-        { id=10714338461,      name="Rowing"               },
-        { id=10713966026,      name="Swim"                 },
-        { id=10714395441,      name="Run Alt"              },
-        { id=10714374484,      name="Walk Alt"             },
-        { id=10714359093,      name="Jump Alt"             },
-        { id=10714356920,      name="Fall Alt"             },
-    }
-
-    -- ── State ───────────────────────────────────────────────────
-    local animEnabled      = false
-    local currentTrack     = nil   -- active AnimationTrack
-    local currentAnimId    = nil   -- currently selected id (number)
-    local animSpeed        = 1
-    local animLooped       = true
-    local animSpeedConn    = nil   -- RunService conn for live speed sync
-
-    -- ── Helpers ─────────────────────────────────────────────────
-    local function getHum()
-        local c = player.Character
-        return c and c:FindFirstChildOfClass("Humanoid")
-    end
-
-    local function stopAnimation()
-        if currentTrack then
-            pcall(function() currentTrack:Stop() end)
-            pcall(function() currentTrack:Destroy() end)
-            currentTrack = nil
-        end
-        if animSpeedConn then animSpeedConn:Disconnect(); animSpeedConn = nil end
-    end
-
-    -- Stop all playing tracks on the humanoid (like the original "Stop" button)
-    local function stopAllAnimations()
-        local hum = getHum()
-        if not hum then return end
-        stopAnimation()
-        for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
-            pcall(function() track:Stop() end)
-        end
-        WindUI:Notify({ Title="Animations", Content="All animations stopped.", Icon="square", Duration=2 })
-    end
-
-    local function playAnimation(id)
-        if not isPremium then return end
-        local hum = getHum()
-        if not hum then
-            WindUI:Notify({ Title="Animations", Content="No humanoid found.", Icon="alert-circle", Duration=3 })
-            return
-        end
-        stopAnimation()
-        currentAnimId = id
-        local anim = Instance.new("Animation")
-        anim.AnimationId = "rbxassetid://" .. tostring(id)
-        local ok, track = pcall(function() return hum:LoadAnimation(anim) end)
-        anim:Destroy()
-        if not ok or not track then
-            WindUI:Notify({ Title="Animations", Content="Failed to load animation "..id, Icon="alert-circle", Duration=3 })
-            return
-        end
-        currentTrack        = track
-        currentTrack.Looped = animLooped
-        currentTrack:Play()
-        currentTrack:AdjustSpeed(animSpeed)
-        -- Keep speed synced while the track plays
-        animSpeedConn = RunService.Heartbeat:Connect(function()
-            if currentTrack and currentTrack.IsPlaying then
-                pcall(function() currentTrack:AdjustSpeed(animSpeed) end)
-            end
-        end)
-    end
-
-    -- Reattach after respawn
-    player.CharacterAdded:Connect(function()
-        currentTrack  = nil
-        animSpeedConn = nil
-        if animEnabled and currentAnimId then
-            task.wait(1)
-            playAnimation(currentAnimId)
-        end
-    end)
-
-    -- ── Build dropdown options ───────────────────────────────────
-    local dropdownOptions = {}
-    for _, entry in ipairs(ANIMATION_LIST) do
-        table.insert(dropdownOptions, entry.name)
-    end
-    -- Map name → id for quick lookup
-    local nameToId = {}
-    for _, entry in ipairs(ANIMATION_LIST) do
-        nameToId[entry.name] = entry.id
-    end
-
-    -- ── UI ──────────────────────────────────────────────────────
-    -- Enable toggle (premium-locked) — assigned to outer forward-declared var
-    animToggle = AnimSection:Toggle({
-        Title   = "👑 Enable Animations",
-        Desc    = "Play dance animations visible to everyone in the server.",
-        Value   = false,
-        Locked  = true,
-        LockedTitle = "Upgrade to Premium at pandauth.com to access Animations.",
-        Callback = function(state)
-            if not isPremium then
-                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
-                return
-            end
-            animEnabled = state
-            if not state then
-                stopAllAnimations()
-            else
-                WindUI:Notify({ Title="Animations", Content="Pick an animation from the dropdown below.", Icon="music", Duration=3 })
-            end
-        end,
-    })
-
-    -- Animation picker dropdown — assigned to outer forward-declared var
-    animDropdown = AnimSection:Dropdown({
-        Title   = "👑 Pick Animation",
-        Desc    = "Select an animation to play. Visible to all players.",
-        List    = dropdownOptions,
-        Locked  = true,
-        LockedTitle = "Upgrade to Premium at pandauth.com.",
-        Callback = function(selected)
-            if not isPremium then
-                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
-                return
-            end
-            if not animEnabled then
-                WindUI:Notify({ Title="Animations", Content="Enable animations first using the toggle above.", Icon="alert-circle", Duration=3 })
-                return
-            end
-            local id = nameToId[selected]
-            if not id then return end
-            playAnimation(id)
-            WindUI:Notify({ Title="▶ Playing", Content=selected, Icon="music", Duration=2 })
-        end,
-    })
-
-    -- Loop toggle
-    AnimSection:Toggle({
-        Title   = "Loop Animation",
-        Desc    = "Whether the animation repeats automatically.",
-        Value   = true,
-        Callback = function(state)
-            animLooped = state
-            if currentTrack then
-                pcall(function() currentTrack.Looped = state end)
-            end
-        end,
-    })
-
-    -- Speed slider
-    AnimSection:Slider({
-        Title = "Animation Speed",
-        Desc  = "Playback speed multiplier (1 = normal).",
-        Step  = 0.1,
-        Value = { Min=0.1, Max=5, Default=1 },
-        Callback = function(v)
-            animSpeed = v
-            if currentTrack and currentTrack.IsPlaying then
-                pcall(function() currentTrack:AdjustSpeed(animSpeed) end)
-            end
-        end,
-    })
-
-    -- Stop button
-    AnimSection:Button({
-        Title = "Stop All Animations",
-        Desc  = "Immediately stops every playing animation.",
-        Icon  = "square",
-        Callback = function()
-            stopAllAnimations()
-        end,
-    })
-
-    -- Custom ID input
-    AnimSection:Input({
-        Title       = "Custom Animation ID",
-        Desc        = "Enter any Roblox animation asset ID to play it.",
-        Placeholder = "e.g. 507770239",
-        Callback    = function(text)
-            if not isPremium then
-                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
-                return
-            end
-            if not animEnabled then
-                WindUI:Notify({ Title="Animations", Content="Enable animations first.", Icon="alert-circle", Duration=3 })
-                return
-            end
-            local id = tonumber(text)
-            if not id then
-                WindUI:Notify({ Title="Animations", Content="Invalid ID — numbers only.", Icon="x-circle", Duration=3 })
-                return
-            end
-            playAnimation(id)
-            WindUI:Notify({ Title="▶ Custom", Content="Playing ID "..id, Icon="music", Duration=2 })
-        end,
     })
 end
 
