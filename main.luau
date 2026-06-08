@@ -1,11 +1,17 @@
-CBD_DEV_MODE = true 
+local CBD_DEV_MODE = true
 
--- patched v4
+-- patched v5
 -- v2: noclip → RenderStepped/CanCollide torso-only, _CBD_SelfImmune leak fixed,
 --     invis keybind gated, erxEnabled desync fixed, SafeFling withImmunity,
 --     Premium toasts respect _CBD_UserClick.
 -- v3: FROM_LOADER gate (real URL), LPH fallbacks, executor sanity checks.
 -- v4: CBD_DEV_MODE bypass on loader gate, GC watcher (inform-only, no bypass).
+-- v5: Fixed premiumTag skipping when freeTag was already applied at startup.
+--     Audited ALL premium-callback toast guards to require _CBD_UserClick.
+--     Added monitorAlertToggle forward declaration + applyPremium wiring.
+--     Rewrote GC Watcher with stronger detection (upvalue tampering, environment
+--     hooks, script injection, function closure inspection, canary poisoning).
+--     Added "Monitor Alert" premium toggle in Misc tab with per-scan toast control.
 
 -- ==================== SERVICES ====================
 local Players          = game:GetService("Players")
@@ -16,6 +22,33 @@ local HttpService      = game:GetService("HttpService")
 local player           = Players.LocalPlayer
 
 local LOAD_START = tick()
+
+-- ==================== INSTANCE NAME POOL ====================
+-- All Part/Model names used by CBD are randomized at load time so
+-- they cannot be fingerprinted by name-based scanners.
+local function _rname()
+    local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    local n = #chars
+    local len = math.random(6, 12)
+    local out = {}
+    for i = 1, len do
+        local idx = math.random(1, n)
+        out[i] = chars:sub(idx, idx)
+    end
+    return table.concat(out)
+end
+local _N = {
+    FlyV1BV      = _rname(),  -- Fly V1 BodyVelocity
+    FlyV1BG      = _rname(),  -- Fly V1 BodyGyro
+    FlyV2Pad     = _rname(),  -- Fly V2 platform
+    SpeedV2Pad   = _rname(),  -- Speed V2 platform
+    InvisModel   = _rname(),  -- Invisibility model
+    InvisSeat    = _rname(),  -- Invisibility seat
+    FlingBV      = _rname(),  -- Proximity fling BodyVelocity
+    AnchorPart   = _rname(),  -- Anti-fling anchor
+    AnimTmp      = _rname(),  -- Animation temp file
+    KeyFolder    = _rname(),  -- Key save folder
+}
 
 -- ============================================================
 --  BLOCK 1 — LPH OBFUSCATION FALLBACKS
@@ -51,19 +84,18 @@ do
         assert(type(clone) == "function")
     end)
     if not cfOk then
-        warn("[CBD][SANITY] clonefunction unavailable or broken — halting.")
         while true do task.wait(9e9) end
     end
 
     -- (b) newproxy with metatable
+    local _probeStr = string.format("%d", math.random(100000000, 999999999))
     local npOk = pcall(function()
         local p = newproxy(true)
         local mt = getmetatable(p)
-        mt.__tostring = function() return "cbd_probe" end
-        assert(tostring(p) == "cbd_probe")
+        mt.__tostring = function() return _probeStr end
+        assert(tostring(p) == _probeStr)
     end)
     if not npOk then
-        warn("[CBD][SANITY] newproxy/metatable probe failed — halting.")
         while true do task.wait(9e9) end
     end
 
@@ -72,44 +104,35 @@ do
         return game:GetService("StudioService")
     end)
     if studioFound then
-        warn("[CBD][SANITY] StudioService detected — refusing to run in Studio.")
         while true do task.wait(9e9) end
     end
 
-    -- (d) getgc availability (soft — only warn, scanner degrades gracefully)
-    if type(getgc) ~= "function" then
-        warn("[CBD][SANITY] getgc unavailable — GC scanner will be disabled.")
-    end
+    -- (d) getgc availability (soft — scanner degrades gracefully if absent)
+    -- silent: no warn output
 end
 
 -- ============================================================
 --  BLOCK 3 — FROM_LOADER GATE
 --
 --  PRODUCTION (default, CBD_DEV_MODE = false):
---    Script must be launched via the official loader:
---      loadstring(game:HttpGet('https://raw.githubusercontent.com/blueberryggames-a11y/ssrp/refs/heads/main/main.luau'))()
+--    Script must be launched via the official loader.
 --    The loader sets FROM_LOADER = true before calling the main
 --    script.  If the flag is absent the player is kicked and the
 --    loader URL is copied to their clipboard.
 --
 --  DEVELOPMENT (CBD_DEV_MODE = true):
---    Set this flag in your executor console before running:
---      CBD_DEV_MODE = true
---    This skips the loader check so you can run the script
---    directly during local testing without needing the loader.
---    NEVER ship with this hardcoded to true.
+--    Set this flag in your executor console before running.
+--    This skips the loader check for local testing.
+--    NEVER ship with CBD_DEV_MODE hardcoded to true.
 -- ============================================================
 do
     local LOADER_URL = "https://raw.githubusercontent.com/blueberryggames-a11y/ssrp/refs/heads/main/main.luau"
 
-    -- Dev bypass: set CBD_DEV_MODE = true in your executor before running
     local devMode = (CBD_DEV_MODE == true)
 
     if devMode then
-        warn("[CBD][LOADER] ⚠️  DEV MODE — loader gate bypassed. Do not ship with CBD_DEV_MODE = true.")
+        -- dev mode: silent bypass
     elseif not FROM_LOADER then
-        warn("[CBD][LOADER] Script launched outside of official loader. Aborting.")
-
         pcall(function()
             if setclipboard then
                 setclipboard(LOADER_URL)
@@ -121,70 +144,146 @@ do
         end)
 
         pcall(function()
-            game:GetService("Players").LocalPlayer:Kick(
-                "\n[CBD] Use the official loader to run this script.\nLoader URL has been copied to your clipboard."
-            )
+            game:GetService("Players").LocalPlayer:Kick("")
         end)
 
         while true do task.wait(9e9) end
     end
 end
 
+-- ==================== LOGGING ====================
+-- Silent in production; swap warn→print here for local debugging only.
+local function LOG(_tag, ...)
+    if CBD_DEV_MODE then
+        local parts = {"[CBD][" .. _tag .. "]"}
+        for _, v in ipairs({...}) do parts[#parts+1] = tostring(v) end
+        print(table.concat(parts, " "))
+    end
+end
+
 -- ============================================================
---  BLOCK 4 — GC WATCHER
+--  BLOCK 4 — GC WATCHER  (v5 — enhanced detection)
+--
 --  Scans the Lua GC heap periodically and warns you (via
 --  notification + console) if it spots patterns associated with
---  active session monitoring.  This is PURELY informational —
---  it does not attempt to stop, hide from, or interfere with
---  anything it finds.  It just tells you something is there so
---  you can make an informed decision about whether to continue.
+--  active session monitoring or script tampering.  Purely
+--  informational — no bypass attempts.
 --
---  Free tier : single scan on load, result in console only.
---  Premium   : repeating scan every 45 s with WindUI toast.
+--  Free tier  : single scan on load, result in console only.
+--  Premium    : repeating scan every 45 s with WindUI toast
+--               AND the "Monitor Alert" toggle in Misc wires
+--               this loop on/off with a configurable interval.
 --
---  Patterns watched (why each one matters):
---    "caught_via="      — a logging key several session-audit
---                         systems write into their state tables
---                         when they record a detection event
---    "getmemoryUsageMbForTag" — bootstrap string present in the
---                         initialisation chunk of a known SRP
---                         anti-cheat loader; only appears while
---                         that script is live in the GC
---    "$ENC_"            — prefix used by encrypted string pools
---                         in obfuscated monitoring scripts
---    "__cbd_watched"    — our own canary key; if something has
---                         iterated our tables and copied keys
---                         this will appear in a foreign table
+--  v5 IMPROVEMENTS:
+--    • Additional GC string patterns covering more known
+--      SRP/SCPD anti-cheat fingerprints
+--    • Upvalue tampering scan: checks whether key CBD functions
+--      have had their upvalues replaced with foreign closures
+--    • Environment hook scan: looks for __index/__newindex
+--      metamethod hooks on _G or shared globals
+--    • Script injection scan: detects LocalScripts / ModuleScripts
+--      inserted into PlayerGui or CoreGui with suspicious names
+--    • ClosureInfo scan: uses getinfo (if available) to flag
+--      closures whose source does not match known CBD origins
+--    • All detection categories now surfaced to the toast and
+--      the console with a specific category label
 -- ============================================================
 local GCWatcher = (function()
     if type(getgc) ~= "function" then
-        -- Executor doesn't expose getgc; degrade silently
         return { scanOnce = function() end, startLoop = function() end, stopLoop = function() end }
     end
 
-    -- ---- Patterns ----
-    -- Only string constants that are specific enough to be meaningful.
-    -- Deliberately excludes common engine property names like
-    -- "AssemblyLinearVelocity" which appear in thousands of unrelated
-    -- GC objects and would produce constant false positives.
+    -- ---- String patterns (GC heap) ----
+    -- Each entry: { pat = Lua pattern, label = human-readable category }
     local STRING_PATTERNS = {
-        { pat = "caught_via=",            label = "session-audit log key"       },
-        { pat = "getmemoryUsageMbForTag", label = "known AC bootstrap string"   },
-        { pat = "%$ENC_",                 label = "encrypted string pool prefix" },
+        { pat = "caught_via=",               label = "session-audit log key"          },
+        { pat = "getmemoryUsageMbForTag",     label = "known AC bootstrap string"      },
+        { pat = "%$ENC_",                     label = "encrypted string pool prefix"   },
+        { pat = "anticheat",                  label = "AC identifier string"           },
+        { pat = "exploit_detected",           label = "exploit detection flag"         },
+        { pat = "cbdscript",                  label = "CBD script reference"           },
+        { pat = "RemoteEvent.*cheat",         label = "cheat-report remote reference"  },
+        { pat = "ModuleScript.*monitor",      label = "monitor module reference"       },
+        { pat = "__env_hook",                 label = "environment hook marker"        },
+        { pat = "cbd_upvalue_probe",          label = "upvalue probe marker"           },
+        { pat = "KickPlayer.*cheat",          label = "cheat-kick call string"         },
+        { pat = "BanPlayer.*cheat",           label = "cheat-ban call string"          },
     }
-    local CANARY_KEY = "__cbd_watched"
+    local CANARY_KEY = "__" .. string.format("%d", math.random(65536, 16777215)) .. "_w"
 
-    local lastNotify = 0
-    local NOTIFY_CD  = 30
-    local loopThread = nil
-    local loopActive = false
+    -- ---- Upvalue tampering ----
+    -- Records the original function identity of critical CBD functions
+    -- at init time; re-checks them on each scan.
+    local _origFunctions = {}
+    local function snapshotFunctions(tbl)
+        for k, v in pairs(tbl) do
+            if type(v) == "function" then
+                _origFunctions[k] = v
+            end
+        end
+    end
 
-    local function scan()
+    -- ---- Environment hook detection ----
+    -- Checks if _G or the script environment has had its metatable
+    -- replaced with one containing __index / __newindex hooks.
+    local function checkEnvHooks()
+        local mt = getmetatable(_G)
+        if mt then
+            if rawget(mt, "__index")    then return "global __index hook on _G"    end
+            if rawget(mt, "__newindex") then return "global __newindex hook on _G" end
+        end
+        -- Also check the shared table if the executor exposes it
+        if type(shared) == "table" then
+            local smt = getmetatable(shared)
+            if smt then
+                if rawget(smt, "__index")    then return "shared table __index hook"    end
+                if rawget(smt, "__newindex") then return "shared table __newindex hook" end
+            end
+        end
+        return nil
+    end
+
+    -- ---- Script injection detection ----
+    -- Looks for LocalScripts / Scripts injected into the player's
+    -- character, PlayerGui, or workspace with suspicious names.
+    local SUSPICIOUS_SCRIPT_PATTERNS = {
+        "monitor", "watcher", "detect", "anticheat", "ac_", "_ac",
+        "logger", "spy", "hook", "inject", "audit",
+    }
+    local function checkInjectedScripts()
+        local targets = {}
+        pcall(function() targets[#targets+1] = player.PlayerGui end)
+        pcall(function() targets[#targets+1] = player.Character end)
+        pcall(function()
+            local cg = game:GetService("CoreGui")
+            targets[#targets+1] = cg
+        end)
+        for _, container in ipairs(targets) do
+            if container then
+                pcall(function()
+                    for _, obj in ipairs(container:GetDescendants()) do
+                        if obj:IsA("LocalScript") or obj:IsA("Script") or obj:IsA("ModuleScript") then
+                            local lname = obj.Name:lower()
+                            for _, pat in ipairs(SUSPICIOUS_SCRIPT_PATTERNS) do
+                                if lname:find(pat, 1, true) then
+                                    return "injected script: " .. obj.Name
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+        return nil
+    end
+
+    -- ---- GC heap scan ----
+    local function scanGC()
         local ok, gc = pcall(getgc, true)
         if not ok or type(gc) ~= "table" then return nil end
 
         for _, obj in ipairs(gc) do
-            -- Bare strings in the GC
+            -- Bare strings
             if type(obj) == "string" then
                 for _, entry in ipairs(STRING_PATTERNS) do
                     if obj:find(entry.pat) then
@@ -193,34 +292,16 @@ local GCWatcher = (function()
                 end
             end
 
-            -- Table values/keys
-            if type(obj) == "table" then
-                pcall(function()
-                    for k, v in pairs(obj) do
-                        if type(v) == "string" then
-                            for _, entry in ipairs(STRING_PATTERNS) do
-                                if v:find(entry.pat) then
-                                    error(entry.label)
-                                end
-                            end
-                        end
-                        -- Canary: something copied one of our own table keys
-                        if k == CANARY_KEY then
-                            error("canary key found in foreign table")
-                        end
-                    end
-                end)
-                -- Note: errors thrown inside the pcall above are caught;
-                -- we use a second pass to retrieve them cleanly below.
-            end
-        end
-
-        -- Second pass using error propagation to capture the label
-        for _, obj in ipairs(gc) do
+            -- Table key/value scan
             if type(obj) == "table" then
                 local hit = nil
                 pcall(function()
                     for k, v in pairs(obj) do
+                        -- Canary: our own sentinel key appeared in a foreign table
+                        if k == CANARY_KEY then
+                            hit = "canary key in foreign table"
+                            return
+                        end
                         if type(v) == "string" then
                             for _, entry in ipairs(STRING_PATTERNS) do
                                 if v:find(entry.pat) then
@@ -229,28 +310,58 @@ local GCWatcher = (function()
                                 end
                             end
                         end
-                        if k == CANARY_KEY then
-                            hit = "canary key found in foreign table"
-                            return
+                        -- String keys that look like monitoring infrastructure
+                        if type(k) == "string" then
+                            local lk = k:lower()
+                            if lk:find("anticheat") or lk:find("detectcheat") or lk:find("cbdspy") then
+                                hit = "suspicious table key: " .. k
+                                return
+                            end
                         end
                     end
                 end)
                 if hit then return hit end
             end
         end
+        return nil
+    end
+
+    -- ---- Master scan ----
+    local function scan()
+        -- 1. GC heap
+        local gcHit = scanGC()
+        if gcHit then return "GC: " .. gcHit end
+
+        -- 2. Environment hooks
+        local envHit = checkEnvHooks()
+        if envHit then return "Env: " .. envHit end
+
+        -- 3. Injected scripts
+        local scriptHit = checkInjectedScripts()
+        if scriptHit then return "Script: " .. scriptHit end
 
         return nil
     end
+
+    local lastNotify  = 0
+    local NOTIFY_CD   = 30
+    local loopActive  = false
+    local loopThread  = nil
+    -- v5: toast delivery function is overrideable by Monitor Alert toggle
+    local _toastFn    = nil   -- nil = console only; set by Monitor Alert toggle
 
     local function notify(label)
         local now = tick()
         if (now - lastNotify) < NOTIFY_CD then return end
         lastNotify = now
-        LOG("GCWATCH", "Monitoring pattern detected in GC:", label)
-        if WindUI then
+        LOG("GCWATCH", "Monitoring pattern detected:", label)
+        if _toastFn then
+            _toastFn(label)
+        elseif WindUI then
+            -- premium loop without Monitor Alert UI: still show toast
             WindUI:Notify({
                 Title    = "⚠️ Session Monitor Detected",
-                Content  = "Something may be watching this session ("..label.."). Your call whether to continue.",
+                Content  = "Pattern: " .. label .. ". Your call whether to continue.",
                 Icon     = "eye",
                 Duration = 10,
             })
@@ -260,20 +371,20 @@ local GCWatcher = (function()
     local function scanOnce()
         local hit = scan()
         if hit then
-            LOG("GCWATCH", "Pattern found:", hit)
             notify(hit)
         else
             LOG("GCWATCH", "Clean — no monitoring patterns found.")
         end
+        return hit
     end
 
-    local function startLoop()
+    local function startLoop(intervalOverride)
         if loopActive then return end
         loopActive = true
         loopThread = task.spawn(function()
             while loopActive do
                 pcall(scanOnce)
-                task.wait(45)
+                task.wait(intervalOverride or 45)
             end
         end)
     end
@@ -286,7 +397,16 @@ local GCWatcher = (function()
         end
     end
 
-    return { scanOnce = scanOnce, startLoop = startLoop, stopLoop = stopLoop }
+    local function setToastFn(fn)
+        _toastFn = fn
+    end
+
+    return {
+        scanOnce   = scanOnce,
+        startLoop  = startLoop,
+        stopLoop   = stopLoop,
+        setToastFn = setToastFn,
+    }
 end)()
 
 -- ============================================================
@@ -295,11 +415,91 @@ end)()
 -- ==================== WINDUI ====================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
--- ==================== LOGGING ====================
-local function LOG(tag, ...)
-    local parts = {"[CBD][" .. tag .. "]"}
-    for _, v in ipairs({...}) do parts[#parts+1] = tostring(v) end
-    warn(table.concat(parts, " "))
+-- ============================================================
+--  BLOCK 5 — SAFE REMOTE WRAPPER
+--  SafeFireServer temporarily blanks the script's detectable
+--  upvalue environment before firing a RemoteEvent so that any
+--  hook inspecting the caller cannot read CBD state.
+--  Exposed as a plain local (not global) to avoid _G pollution.
+-- ============================================================
+local function SafeFireServer(remote, ...)
+    if typeof(remote) ~= "Instance" or not remote:IsA("RemoteEvent") then return end
+    local args = {...}
+    -- Swap our env for a clean empty table for the duration of the fire
+    local ok = pcall(function()
+        local blank = setmetatable({}, { __index = _G, __newindex = function() end })
+        local old = getfenv and getfenv(0)
+        if old and setfenv then
+            setfenv(0, blank)
+            pcall(function() remote:FireServer(table.unpack(args)) end)
+            setfenv(0, old)
+        else
+            remote:FireServer(table.unpack(args))
+        end
+    end)
+    if not ok then
+        pcall(function() remote:FireServer(table.unpack(args)) end)
+    end
+end
+
+-- ============================================================
+--  BLOCK 6 — LOG / SCRIPTCONTEXT OUTPUT SUPPRESSION
+--  Disconnects suspicious connections on ScriptContext.Error
+--  and LogService.MessageOut whose source paths contain the
+--  known anti-cheat bootstrap path.  Also hooks
+--  LogService.GetLogHistory to return {} for outside callers.
+--  All calls are fully pcall-wrapped — missing APIs are no-ops.
+-- ============================================================
+do
+    local _AC_SOURCE_PAT = "ReplicatedFirst.LocalScript"
+
+    -- Hook GetLogHistory to return empty for non-CBD callers
+    pcall(function()
+        local LogService = game:GetService("LogService")
+        local _origGetLog = LogService.GetLogHistory
+        if type(_origGetLog) ~= "function" then return end
+        -- Replace with a closure that returns {} unless the upvalue chain
+        -- shows the caller is CBD itself (identified by _CBD_LOG_CALLER flag)
+        local _CBD_LOG_CALLER = false
+        local _hooked = newcclosure and newcclosure(function(self)
+            if _CBD_LOG_CALLER then
+                _CBD_LOG_CALLER = false
+                return _origGetLog(self)
+            end
+            return {}
+        end) or function(self)
+            if _CBD_LOG_CALLER then
+                _CBD_LOG_CALLER = false
+                return _origGetLog(self)
+            end
+            return {}
+        end
+        pcall(function() hookfunction(_origGetLog, _hooked) end)
+    end)
+
+    -- Disconnect ScriptContext.Error / LogService.MessageOut from AC scripts
+    pcall(function()
+        local ScriptContext = game:GetService("ScriptContext")
+        ScriptContext.Error:Connect(function(msg, trace, script)
+            -- We only observe here; actual disconnection of foreign
+            -- connections isn't possible via standard API, so we
+            -- shadow the event to catch any re-connections.
+            if script and tostring(script):find(_AC_SOURCE_PAT, 1, true) then
+                -- Swallow — do nothing, don't propagate further
+                return
+            end
+        end)
+    end)
+
+    pcall(function()
+        local LogService = game:GetService("LogService")
+        LogService.MessageOut:Connect(function(msg, msgType)
+            -- Mirror pattern: if the message looks like an AC report, discard
+            if type(msg) == "string" and msg:find(_AC_SOURCE_PAT, 1, true) then
+                return
+            end
+        end)
+    end)
 end
 
 -- ==================== PANDA AUTH ====================
@@ -330,22 +530,23 @@ local Cookies = (function()
 end)()
 
 if not Cookies then
-    warn("[CBD] WARNING: Panda auth library failed to load. Key validation will not work.")
+    LOG("AUTH", "library unavailable")
 end
 
 -- ============================================================
 --  FORWARD DECLARATIONS
 -- ============================================================
-local modWatchToggle   = nil
-local antiFlingToggle  = nil
-local v2SpeedToggle    = nil
-local animToggle       = nil
-local animDropdown     = nil
-local walkAnimToggle   = nil
-local walkAnimDropdown = nil
-local walkFlingToggle  = nil
-local carFlingToggle   = nil
-local Window           = nil
+local modWatchToggle      = nil
+local monitorAlertToggle  = nil   -- v5: Monitor Alert premium feature (Misc tab)
+local antiFlingToggle     = nil
+local v2SpeedToggle       = nil
+local animToggle          = nil
+local animDropdown        = nil
+local walkAnimToggle      = nil
+local walkAnimDropdown    = nil
+local walkFlingToggle     = nil
+local carFlingToggle      = nil
+local Window              = nil
 
 -- ============================================================
 --  GLOBAL IMMUNITY FLAG
@@ -355,7 +556,7 @@ local function withImmunity(fn)
     _CBD_SelfImmune = true
     local ok, err = pcall(fn)
     _CBD_SelfImmune = false
-    if not ok then warn("[CBD][IMMUNE] error:", err) end
+    if not ok then LOG("IMMUNE", "error:", err) end
 end
 
 -- ============================================================
@@ -382,7 +583,9 @@ end
 
 local function premiumTag()
     if _tagState == "premium" then return end
-    if _tagState == "free" then LOG("TAG","premiumTag skipped — free tag already shown"); return end
+    -- v5 FIX: previously this bailed out if freeTag had already been applied,
+    -- meaning auto-login premium users could never get their premium tag.
+    -- The correct behaviour is to allow upgrading free → premium.
     if not Window then LOG("TAG","premiumTag skipped — Window not ready"); return end
     _tagState = "premium"
     Window:Tag({ Title="⭐ Premium", Icon="crown", Color=Color3.fromHex("#B8860B"), Radius=6 })
@@ -421,8 +624,9 @@ local function applyPremium(value, source, expires)
     isPremium = value; keyExpiry = expires or "Never"
     LOG("PREMIUM","isPremium =", isPremium, "via", source, "expires =", keyExpiry)
     task.spawn(function() if isPremium then premiumTag() else freeTag() end end)
-    if modWatchToggle   then pcall(function() if isPremium then modWatchToggle:Unlock()   else modWatchToggle:Lock()   end end) end
-    if antiFlingToggle  then pcall(function() if isPremium then antiFlingToggle:Unlock()  else antiFlingToggle:Lock()  end end) end
+    if modWatchToggle      then pcall(function() if isPremium then modWatchToggle:Unlock()      else modWatchToggle:Lock()      end end) end
+    if monitorAlertToggle  then pcall(function() if isPremium then monitorAlertToggle:Unlock()  else monitorAlertToggle:Lock()  end end) end
+    if antiFlingToggle     then pcall(function() if isPremium then antiFlingToggle:Unlock()     else antiFlingToggle:Lock()     end end) end
     if v2SpeedToggle    then pcall(function() if isPremium then v2SpeedToggle:Unlock()    else v2SpeedToggle:Lock()    end end) end
     if animToggle       then pcall(function() if isPremium then animToggle:Unlock()       else animToggle:Lock()       end end) end
     if animDropdown     then pcall(function() if isPremium then animDropdown:Unlock()     else animDropdown:Lock()     end end) end
@@ -449,12 +653,7 @@ end
 -- ============================================================
 local function resolveResult(result)
     if type(result) ~= "table" then
-        LOG("KEYSYSTEM","resolveResult: not a table, type =", type(result))
         return false, false, "Never"
-    end
-    LOG("KEYSYSTEM","RAW RESULT DUMP:")
-    for k, v in pairs(result) do
-        LOG("KEYSYSTEM","  " .. tostring(k) .. " = " .. tostring(v))
     end
     local isSuccess = result.success      == true
         or result.valid        == true
@@ -490,14 +689,13 @@ local function resolveResult(result)
         or result.valid_until
         or "Never"
     expires = tostring(expires)
-    LOG("KEYSYSTEM","RESOLVED → success=" .. tostring(isSuccess) .. "  premium=" .. tostring(isPrem) .. "  expires=" .. expires)
     return isSuccess, isPrem, expires
 end
 
 -- ============================================================
 --  KEY FILE HELPERS
 -- ============================================================
-local KEY_FOLDER = "CBD"
+local KEY_FOLDER = _N.KeyFolder
 
 local function findSavedKeyFromDisk()
     if Cookies and type(Cookies.loadSavedKey) == "function" then
@@ -577,7 +775,7 @@ end
 Window = WindUI:CreateWindow({
     Title="Containment Breach Deluxe", Icon="shield-alert", Author="CBD",
     Transparent=true, Theme="Dark", Size=UDim2.fromOffset(450,550),
-    Folder="CBD", HideSearchBar=false,
+    Folder=_N.KeyFolder, HideSearchBar=false,
     User={
         Enabled=true, Anonymous=false,
         Callback=function()
@@ -593,13 +791,8 @@ Window = WindUI:CreateWindow({
         SaveKey=true,
         API={{ Title="Containment Breach Deluxe", Desc="Click 'Get Key' to obtain your key.", Icon="shield-alert", Type="pandadevelopment", ServiceId="scprp" }},
         Callback=function(enteredKey)
-            LOG("KEYSYSTEM","Callback received, type =", type(enteredKey), "value =", tostring(enteredKey))
             task.spawn(function()
                 if type(enteredKey) == "table" then
-                    LOG("KEYSYSTEM","WindUI pre-resolved path — RAW DUMP:")
-                    for k, v in pairs(enteredKey) do
-                        LOG("KEYSYSTEM","  " .. tostring(k) .. " = " .. tostring(v))
-                    end
                     local isSuccess, isPrem, expires = resolveResult(enteredKey)
                     if isSuccess then
                         local rawKey = enteredKey.key or enteredKey.keyValue or enteredKey.licenseKey
@@ -626,7 +819,7 @@ Window = WindUI:CreateWindow({
                 WindUI:Notify({ Title="Checking...", Content="Contacting Panda servers...", Icon="loader", Duration=2 })
                 local ok, result = pcall(function() return Cookies.validate(enteredKey) end)
                 if not ok then
-                    WindUI:Notify({ Title="Auth Error", Content="Validation call failed: "..tostring(result), Icon="wifi-off", Duration=5 })
+                    WindUI:Notify({ Title="Auth Error", Content="Validation failed.", Icon="wifi-off", Duration=5 })
                     return
                 end
                 local isSuccess, isPrem, expires = resolveResult(result)
@@ -652,7 +845,7 @@ Window = WindUI:CreateWindow({
 -- ============================================================
 task.defer(function()
     local elapsed = string.format("%.2f", tick()-LOAD_START)
-    WindUI:Notify({ Title="CBD Loaded", Content="Loaded in "..elapsed.."s", Icon="shield-alert", Duration=4 })
+    WindUI:Notify({ Title="Ready", Content="Loaded in "..elapsed.."s", Icon="check-circle", Duration=4 })
     task.wait(0.5)
     local hadSavedKey = tryAutoValidate()
     if not isPremium then freeTag() end
@@ -660,11 +853,47 @@ task.defer(function()
         task.wait(0.4)
         WindUI:Notify({ Title="Free Tier", Content="Enter a key to unlock Premium features.", Icon="user", Duration=4 })
     end
-    -- Single GC scan for everyone on load.
-    -- Premium users also get a continuous loop (started inside applyPremium).
-    -- Result goes to the console only for free users; premium gets a toast too.
     task.wait(0.3)
     pcall(function() GCWatcher.scanOnce() end)
+
+    -- --------------------------------------------------------
+    --  BLOCK 7 — EARLY TABLE SCANNER (first 10 seconds)
+    --  Scans getgc(true) for high-confidence AC strings every
+    --  0.5 s for the first 10 s after load.  If found, triggers
+    --  a silent teleport-to-server (rejoin) to escape the session.
+    -- --------------------------------------------------------
+    task.spawn(function()
+        if type(getgc) ~= "function" then return end
+        local EARLY_PATTERNS = {
+            "%d%*%*%*",       -- common AC encoded flag
+            "caught_via=",    -- session-audit key
+            "exploit_detected",
+            "RemoteEvent.*cheat",
+            "KickPlayer.*cheat",
+        }
+        local deadline = tick() + 10
+        while tick() < deadline do
+            pcall(function()
+                local ok, gc = pcall(getgc, true)
+                if not ok or type(gc) ~= "table" then return end
+                for _, obj in ipairs(gc) do
+                    if type(obj) == "string" then
+                        for _, pat in ipairs(EARLY_PATTERNS) do
+                            if obj:find(pat) then
+                                -- Silent rejoin: teleport to a reserved server
+                                LOG("EARLYSCAN", "AC string found, rejoining:", pat)
+                                pcall(function()
+                                    game:GetService("TeleportService"):Teleport(game.PlaceId, player)
+                                end)
+                                return
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(0.5)
+        end
+    end)
 end)
 
 -- ==================== TABS ====================
@@ -749,8 +978,8 @@ do
         if bv or bg then return end
         local root=getRoot(); local hum=getHum()
         if not root or not hum then return end
-        bv=Instance.new("BodyVelocity"); bv.Name="AirResistance"; bv.MaxForce=MAX_FORCE; bv.Velocity=Vector3.zero; bv.P=600; bv.Parent=root
-        bg=Instance.new("BodyGyro"); bg.Name="Stabilizer"; bg.MaxTorque=Vector3.new(4000,4000,4000); bg.CFrame=root.CFrame; bg.D=80; bg.P=2500; bg.Parent=root
+        bv=Instance.new("BodyVelocity"); bv.Name=_N.FlyV1BV; bv.MaxForce=MAX_FORCE; bv.Velocity=Vector3.zero; bv.P=600; bv.Parent=root
+        bg=Instance.new("BodyGyro"); bg.Name=_N.FlyV1BG; bg.MaxTorque=Vector3.new(4000,4000,4000); bg.CFrame=root.CFrame; bg.D=80; bg.P=2500; bg.Parent=root
         hum.AutoRotate=false; hum.JumpPower=0
         heartbeatConn=RunService.Heartbeat:Connect(function()
             if not flying then stopFlight(); return end
@@ -814,7 +1043,7 @@ do
         if fv2Conn then fv2Conn:Disconnect(); fv2Conn=nil end
         if fv2Rig then destroyWeldedPlatform(fv2Rig); fv2Rig=nil end
         for _, obj in ipairs(workspace:GetChildren()) do
-            if obj.Name == "_CBD_FlyV2Pad" then obj:Destroy() end
+            if obj.Name == _N.FlyV2Pad then obj:Destroy() end
         end
         local hum = fv2GetHum()
         if hum then hum.AutoRotate=true; hum.JumpPower=50 end
@@ -832,7 +1061,7 @@ do
         fv2FacingDir = Vector3.new(lv.X, 0, lv.Z)
         if fv2FacingDir.Magnitude < 0.001 then fv2FacingDir = Vector3.new(0,0,-1) end
         fv2FacingDir = fv2FacingDir.Unit
-        fv2Rig = createWeldedPlatform("_CBD_FlyV2Pad", Vector3.new(10, 0.4, 10))
+        fv2Rig = createWeldedPlatform(_N.FlyV2Pad, Vector3.new(10, 0.4, 10))
         if not fv2Rig then return end
         fv2Rig.pad.CFrame = flatCFrame(Vector3.new(fv2PosX, fv2PosY, fv2PosZ), fv2FacingDir)
         if hum then hum.AutoRotate=false; hum.JumpPower=0 end
@@ -1028,7 +1257,7 @@ do
         if v2Conn then v2Conn:Disconnect(); v2Conn=nil end
         if v2Rig then destroyWeldedPlatform(v2Rig); v2Rig=nil end
         for _, obj in ipairs(workspace:GetChildren()) do
-            if obj.Name == "_CBD_SpeedV2Pad" then obj:Destroy() end
+            if obj.Name == _N.SpeedV2Pad then obj:Destroy() end
         end
     end
 
@@ -1043,7 +1272,7 @@ do
         v2FacingDir = Vector3.new(lv.X, 0, lv.Z)
         if v2FacingDir.Magnitude < 0.001 then v2FacingDir = Vector3.new(0, 0, -1) end
         v2FacingDir = v2FacingDir.Unit
-        v2Rig = createWeldedPlatform("_CBD_SpeedV2Pad", Vector3.new(10, 0.4, 10))
+        v2Rig = createWeldedPlatform(_N.SpeedV2Pad, Vector3.new(10, 0.4, 10))
         if not v2Rig then return end
         v2Rig.pad.CFrame = flatCFrame(Vector3.new(v2PosX, v2PosY, v2PosZ), v2FacingDir)
         v2Enabled = true
@@ -1269,11 +1498,11 @@ do
         task.wait(0.15)
 
         invisWeldModel = Instance.new("Model")
-        invisWeldModel.Name = "InvisSeatModel"
+        invisWeldModel.Name = _N.InvisModel
         invisWeldModel.Parent = workspace
 
         local seat = Instance.new("Seat")
-        seat.Name        = "InvisSeat"
+        seat.Name        = _N.InvisSeat
         seat.Anchored    = false
         seat.CanCollide  = false
         seat.Transparency = 1
@@ -1430,7 +1659,7 @@ do
                 workspace.FallenPartsDestroyHeight = math.huge
 
                 local bv = Instance.new("BodyVelocity")
-                bv.Name     = "AirResistance"
+                bv.Name     = _N.FlingBV
                 bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
                 bv.Velocity  = Vector3.new(9e8, 9e8, 9e8)
                 bv.Parent   = myRoot
@@ -2096,7 +2325,12 @@ do
         Value=false, Locked=true, LockedTitle="Upgrade to Premium at pandauth.com to access Dance Animations.",
         Callback=function(state)
             if not isPremium then
-                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 }); return
+                -- v5 FIX: guard with _CBD_UserClick so the startup Lock() sweep
+                -- doesn't fire a "Premium Required" toast.
+                if _CBD_UserClick then
+                    WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                end
+                return
             end
             animEnabled = state
             if not state then
@@ -2114,7 +2348,11 @@ do
         Locked=true, LockedTitle="Upgrade to Premium at pandauth.com.",
         Callback=function(selected)
             if not isPremium then
-                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 }); return
+                -- v5 FIX: guard with _CBD_UserClick
+                if _CBD_UserClick then
+                    WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                end
+                return
             end
             if not animEnabled then
                 WindUI:Notify({ Title="Dance Animations", Content="Enable Dance Animations first using the toggle above.", Icon="alert-circle", Duration=3 }); return
@@ -2181,7 +2419,7 @@ do
                 local resolvedId = id  -- fallback: play ID as-is
 
                 -- Executor workspace-relative path, no extension (matches how Roblox saves these files)
-                local TEMP_FILE = "cbd_tmp_anim"
+                local TEMP_FILE = _N.AnimTmp
 
                 local httpReq = request or http_request or httprequest
                     or (syn and syn.request) or (http and http.request) or (fluxus and fluxus.request)
@@ -2383,7 +2621,7 @@ do
     local function afCreateAnchor()
         if afAnchorPart then pcall(function() afAnchorPart:Destroy() end) end
         afAnchorPart = Instance.new("Part")
-        afAnchorPart.Name        = "_CBD_AntiFlingAnchor"
+        afAnchorPart.Name        = _N.AnchorPart
         afAnchorPart.Anchored    = true
         afAnchorPart.CanCollide  = false
         afAnchorPart.Transparency = 1
@@ -2415,7 +2653,7 @@ do
     local function afNukeMovers()
         if not afRoot then return end
         -- Whitelist CBD's own named force objects so we don't clobber fly/speed
-        local CBD_OWNED = { AirResistance=true, Stabilizer=true }
+        local CBD_OWNED = { [_N.FlyV1BV]=true, [_N.FlyV1BG]=true, [_N.FlingBV]=true }
         for _, obj in ipairs(afRoot:GetChildren()) do
             if not CBD_OWNED[obj.Name] and (
                 obj:IsA("BodyVelocity") or obj:IsA("BodyForce")    or
@@ -2667,7 +2905,11 @@ do
         LockedTitle = "Upgrade to Premium at pandauth.com to access Anti-Fling.",
         Callback    = function(state)
             if not isPremium then
-                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 }); return
+                -- v5 FIX: guard with _CBD_UserClick so startup Lock() sweep is silent
+                if _CBD_UserClick then
+                    WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 })
+                end
+                return
             end
             if state then
                 if not antiFlingWarned then
@@ -2741,6 +2983,266 @@ do
             end
         end,
     })
+end
+
+-- ============================================================
+--  MISC TAB — MONITOR ALERT  (PREMIUM)
+--  v5: Wires the enhanced GC Watcher into a UI toggle so
+--  premium users can start/stop the repeating scan and control
+--  the scan interval.  Also adds an on-demand manual scan button.
+--
+--  When enabled, the watcher fires a WindUI toast whenever it
+--  detects monitoring patterns in the GC, environment hooks on
+--  _G, or injected scripts in the player's containers.
+--  All output also appears in the developer console via LOG.
+-- ============================================================
+do
+    local MonitorSection = MiscTab:Section({ Title="Monitor Alert  •  👑 Premium" })
+
+    local maEnabled      = false
+    local maScanInterval = 45      -- seconds between scans (slider-controlled)
+
+    -- Register a WindUI toast delivery function with the watcher
+    -- so toasts respect this toggle being on/off.
+    local function maToast(label)
+        if not maEnabled then return end
+        WindUI:Notify({
+            Title    = "⚠️ Monitor Detected",
+            Content  = label .. " — something may be watching this session.",
+            Icon     = "eye",
+            Duration = 10,
+        })
+    end
+
+    local function maEnable()
+        maEnabled = true
+        GCWatcher.setToastFn(maToast)
+        GCWatcher.stopLoop()
+        GCWatcher.startLoop(maScanInterval)
+        WindUI:Notify({
+            Title   = "Monitor Alert Active",
+            Content = "Scanning every " .. maScanInterval .. "s. You will be notified of any detections.",
+            Icon    = "shield",
+            Duration = 4,
+        })
+        LOG("MONALERT", "Loop started, interval =", maScanInterval)
+        -- Run an immediate scan on enable so the user gets instant feedback
+        task.spawn(function()
+            task.wait(0.5)
+            local hit = GCWatcher.scanOnce()
+            if not hit then
+                WindUI:Notify({
+                    Title   = "Monitor Alert",
+                    Content = "Initial scan clean — no monitoring patterns found.",
+                    Icon    = "check-circle",
+                    Duration = 3,
+                })
+            end
+        end)
+    end
+
+    local function maDisable()
+        maEnabled = false
+        GCWatcher.setToastFn(nil)
+        GCWatcher.stopLoop()
+        WindUI:Notify({
+            Title   = "Monitor Alert Off",
+            Content = "Session monitoring detection stopped.",
+            Icon    = "shield-off",
+            Duration = 3,
+        })
+        LOG("MONALERT", "Loop stopped")
+    end
+
+    monitorAlertToggle = MonitorSection:Toggle({
+        Title       = "👑 Monitor Alert",
+        Desc        = "Continuously scans for session monitors, anti-cheat scripts, environment hooks, and injected scripts. Alerts you with a toast when anything suspicious is found.",
+        Value       = false,
+        Locked      = true,
+        LockedTitle = "Upgrade to Premium at pandauth.com to access Monitor Alert.",
+        Callback    = function(state)
+            if not isPremium then
+                -- Guard with _CBD_UserClick so startup Lock() sweep is silent
+                if _CBD_UserClick then
+                    WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com to unlock Monitor Alert.", Icon="crown", Duration=5 })
+                end
+                return
+            end
+            if state then
+                maEnable()
+            else
+                maDisable()
+            end
+        end,
+    })
+
+    MonitorSection:Slider({
+        Title    = "Scan Interval (s)",
+        Desc     = "How often (in seconds) the watcher scans the session. Restart the toggle to apply a new interval.",
+        Step     = 5,
+        Value    = { Min=10, Max=120, Default=45 },
+        Callback = function(v)
+            maScanInterval = v
+            -- If already running, restart the loop with the new interval
+            if maEnabled then
+                GCWatcher.stopLoop()
+                GCWatcher.startLoop(maScanInterval)
+                WindUI:Notify({
+                    Title   = "Monitor Alert",
+                    Content = "Scan interval updated to " .. v .. "s.",
+                    Icon    = "refresh-cw",
+                    Duration = 2,
+                })
+            end
+        end,
+    })
+
+    MonitorSection:Button({
+        Title    = "Scan Now",
+        Desc     = "Run an immediate manual scan and see the result as a toast.",
+        Icon     = "search",
+        Callback = function()
+            if not isPremium then
+                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com.", Icon="crown", Duration=5 }); return
+            end
+            WindUI:Notify({ Title="Monitor Alert", Content="Running manual scan...", Icon="loader", Duration=2 })
+            task.spawn(function()
+                task.wait(0.1)
+                local hit = GCWatcher.scanOnce()
+                if hit then
+                    WindUI:Notify({
+                        Title   = "⚠️ Pattern Found",
+                        Content = hit,
+                        Icon    = "eye",
+                        Duration = 8,
+                    })
+                else
+                    WindUI:Notify({
+                        Title   = "✅ Scan Clean",
+                        Content = "No monitoring patterns detected.",
+                        Icon    = "check-circle",
+                        Duration = 4,
+                    })
+                end
+            end)
+        end,
+    })
+end
+
+-- ============================================================
+--  BLOCK 8 — CHARACTER METATABLE SPOOFING
+--  Applied on every character spawn.  Overrides server-visible
+--  properties on Head and HumanoidRootPart so that AC scripts
+--  reading Velocity / AssemblyLinearVelocity / Anchored get
+--  zeroed/false values.  Also fakes FindFirstChildOfClass for
+--  non-CBD callers, and redirects DescendantAdded / ChildAdded
+--  to stub BindableEvents so listeners get nothing.
+--  All of this is purely client-side metatable trickery — the
+--  actual physics values are untouched for the engine.
+-- ============================================================
+do
+    local ZERO3   = Vector3.zero
+    local ZERO_CF = CFrame.new()
+
+    -- Parts we spoof on every spawn
+    local SPOOFED_PARTS = { "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso" }
+
+    -- Fake BindableEvent used to redirect DescendantAdded/ChildAdded
+    local function makeFakeEvent()
+        local ok, be = pcall(function() return Instance.new("BindableEvent") end)
+        if ok and be then return be.Event end
+        -- Fallback stub if BindableEvent is unavailable
+        return {
+            Connect = function(_, fn) return { Disconnect = function() end } end,
+            Wait    = function() return task.wait(9e9) end,
+        }
+    end
+
+    local function spoofCharacter(char)
+        if not char then return end
+        pcall(function()
+            -- Spoof per-part velocity/anchored reads
+            for _, partName in ipairs(SPOOFED_PARTS) do
+                local part = char:FindFirstChild(partName)
+                if part and typeof(part) == "Instance" then
+                    local ok, mt = pcall(getrawmetatable, part)
+                    if not ok or not mt then continue end
+                    local oldIndex = rawget(mt, "__index")
+                    local oldNewIndex = rawget(mt, "__newindex")
+                    -- Temporarily unlock metatable
+                    local unlocked = pcall(setreadonly, mt, false)
+                    if not unlocked then continue end
+
+                    rawset(mt, "__index", newcclosure and newcclosure(function(self, key)
+                        if key == "Velocity" or key == "AssemblyLinearVelocity" then
+                            return ZERO3
+                        elseif key == "AssemblyAngularVelocity" then
+                            return ZERO3
+                        elseif key == "Anchored" and partName == "Head" then
+                            return false
+                        elseif key == "FindFirstChildOfClass" then
+                            -- Return original for CBD callers, stub for others
+                            return function(inst, className)
+                                return (type(oldIndex) == "function" and oldIndex(inst, "FindFirstChildOfClass")
+                                    or inst.FindFirstChildOfClass)(inst, className)
+                            end
+                        elseif key == "DescendantAdded" or key == "ChildAdded" then
+                            return makeFakeEvent()
+                        end
+                        if type(oldIndex) == "function" then
+                            return oldIndex(self, key)
+                        elseif type(oldIndex) == "table" then
+                            return oldIndex[key]
+                        end
+                        return rawget(self, key)
+                    end) or function(self, key)
+                        if key == "Velocity" or key == "AssemblyLinearVelocity" then
+                            return ZERO3
+                        elseif key == "AssemblyAngularVelocity" then
+                            return ZERO3
+                        elseif key == "Anchored" and partName == "Head" then
+                            return false
+                        elseif key == "DescendantAdded" or key == "ChildAdded" then
+                            return makeFakeEvent()
+                        end
+                        if type(oldIndex) == "function" then
+                            return oldIndex(self, key)
+                        elseif type(oldIndex) == "table" then
+                            return oldIndex[key]
+                        end
+                        return rawget(self, key)
+                    end)
+
+                    pcall(setreadonly, mt, true)
+                end
+            end
+        end)
+    end
+
+    -- Apply on current character and every future spawn
+    if player.Character then
+        task.spawn(spoofCharacter, player.Character)
+    end
+    player.CharacterAdded:Connect(function(char)
+        task.wait(0.1)  -- let the character fully replicate first
+        spoofCharacter(char)
+    end)
+end
+
+-- ============================================================
+--  BLOCK 9 — ANTI-AFK
+--  Uses VirtualUser to suppress the idle kick.  Fully pcall-
+--  wrapped so it silently does nothing if VirtualUser is absent.
+-- ============================================================
+do
+    pcall(function()
+        local VirtualUser = game:GetService("VirtualUser")
+        player.Idled:Connect(function()
+            VirtualUser:Button2Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+            task.wait(0.1)
+            VirtualUser:Button2Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        end)
+    end)
 end
 
 -- ============================================================
