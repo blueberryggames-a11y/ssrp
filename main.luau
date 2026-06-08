@@ -1,4 +1,4 @@
-
+CBD_DEV_MODE = true -- a bit broke
 -- patched v4
 -- v2: noclip → RenderStepped/CanCollide torso-only, _CBD_SelfImmune leak fixed,
 --     invis keybind gated, erxEnabled desync fixed, SafeFling withImmunity,
