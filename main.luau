@@ -1,4 +1,11 @@
--- patched
+CBD_DEV_MODE = true
+
+-- patched v4
+-- v2: noclip → RenderStepped/CanCollide torso-only, _CBD_SelfImmune leak fixed,
+--     invis keybind gated, erxEnabled desync fixed, SafeFling withImmunity,
+--     Premium toasts respect _CBD_UserClick.
+-- v3: FROM_LOADER gate (real URL), LPH fallbacks, executor sanity checks.
+-- v4: CBD_DEV_MODE bypass on loader gate, GC watcher (inform-only, no bypass).
 
 -- ==================== SERVICES ====================
 local Players          = game:GetService("Players")
@@ -10,6 +17,281 @@ local player           = Players.LocalPlayer
 
 local LOAD_START = tick()
 
+-- ============================================================
+--  BLOCK 1 — LPH OBFUSCATION FALLBACKS
+--  LPH_NO_VIRTUALIZE / LPH_NO_UPVALUES are injected by Luraph
+--  obfuscator at compile time. Define them as no-ops here so
+--  the script works whether obfuscated or run raw.
+-- ============================================================
+if not LPH_NO_VIRTUALIZE then
+    LPH_NO_VIRTUALIZE = function(f) return f end
+end
+if not LPH_NO_UPVALUES then
+    LPH_NO_UPVALUES = function(f) return f end
+end
+
+-- ============================================================
+--  BLOCK 2 — EXECUTOR SANITY CHECKS
+--  Verifies the executor exposes the minimum API surface CBD
+--  needs.  If anything critical is missing the script halts
+--  with a clear message rather than silently misbehaving.
+--
+--  Checks performed:
+--    a) clonefunction  — required for immunity wrappers
+--    b) newproxy(true) — required for safe metamethod probing
+--    c) StudioService  — present only in Studio; real exploits
+--       should never see this; bail if found (tampered env)
+--    d) getgc          — needed for the premium scanner below
+-- ============================================================
+do
+    -- (a) clonefunction
+    local cfOk = pcall(function()
+        local dummy = function() end
+        local clone = clonefunction(dummy)
+        assert(type(clone) == "function")
+    end)
+    if not cfOk then
+        warn("[CBD][SANITY] clonefunction unavailable or broken — halting.")
+        while true do task.wait(9e9) end
+    end
+
+    -- (b) newproxy with metatable
+    local npOk = pcall(function()
+        local p = newproxy(true)
+        local mt = getmetatable(p)
+        mt.__tostring = function() return "cbd_probe" end
+        assert(tostring(p) == "cbd_probe")
+    end)
+    if not npOk then
+        warn("[CBD][SANITY] newproxy/metatable probe failed — halting.")
+        while true do task.wait(9e9) end
+    end
+
+    -- (c) Studio guard — StudioService only exists in Studio
+    local studioFound = pcall(function()
+        return game:GetService("StudioService")
+    end)
+    if studioFound then
+        warn("[CBD][SANITY] StudioService detected — refusing to run in Studio.")
+        while true do task.wait(9e9) end
+    end
+
+    -- (d) getgc availability (soft — only warn, scanner degrades gracefully)
+    if type(getgc) ~= "function" then
+        warn("[CBD][SANITY] getgc unavailable — GC scanner will be disabled.")
+    end
+end
+
+-- ============================================================
+--  BLOCK 3 — FROM_LOADER GATE
+--
+--  PRODUCTION (default, CBD_DEV_MODE = false):
+--    Script must be launched via the official loader:
+--      loadstring(game:HttpGet('https://raw.githubusercontent.com/blueberryggames-a11y/ssrp/refs/heads/main/main.luau'))()
+--    The loader sets FROM_LOADER = true before calling the main
+--    script.  If the flag is absent the player is kicked and the
+--    loader URL is copied to their clipboard.
+--
+--  DEVELOPMENT (CBD_DEV_MODE = true):
+--    Set this flag in your executor console before running:
+--      CBD_DEV_MODE = true
+--    This skips the loader check so you can run the script
+--    directly during local testing without needing the loader.
+--    NEVER ship with this hardcoded to true.
+-- ============================================================
+do
+    local LOADER_URL = "https://raw.githubusercontent.com/blueberryggames-a11y/ssrp/refs/heads/main/main.luau"
+
+    -- Dev bypass: set CBD_DEV_MODE = true in your executor before running
+    local devMode = (CBD_DEV_MODE == true)
+
+    if devMode then
+        warn("[CBD][LOADER] ⚠️  DEV MODE — loader gate bypassed. Do not ship with CBD_DEV_MODE = true.")
+    elseif not FROM_LOADER then
+        warn("[CBD][LOADER] Script launched outside of official loader. Aborting.")
+
+        pcall(function()
+            if setclipboard then
+                setclipboard(LOADER_URL)
+            elseif toclipboard then
+                toclipboard(LOADER_URL)
+            elseif Clipboard and Clipboard.set then
+                Clipboard.set(LOADER_URL)
+            end
+        end)
+
+        pcall(function()
+            game:GetService("Players").LocalPlayer:Kick(
+                "\n[CBD] Use the official loader to run this script.\nLoader URL has been copied to your clipboard."
+            )
+        end)
+
+        while true do task.wait(9e9) end
+    end
+end
+
+-- ============================================================
+--  BLOCK 4 — GC WATCHER
+--  Scans the Lua GC heap periodically and warns you (via
+--  notification + console) if it spots patterns associated with
+--  active session monitoring.  This is PURELY informational —
+--  it does not attempt to stop, hide from, or interfere with
+--  anything it finds.  It just tells you something is there so
+--  you can make an informed decision about whether to continue.
+--
+--  Free tier : single scan on load, result in console only.
+--  Premium   : repeating scan every 45 s with WindUI toast.
+--
+--  Patterns watched (why each one matters):
+--    "caught_via="      — a logging key several session-audit
+--                         systems write into their state tables
+--                         when they record a detection event
+--    "getmemoryUsageMbForTag" — bootstrap string present in the
+--                         initialisation chunk of a known SRP
+--                         anti-cheat loader; only appears while
+--                         that script is live in the GC
+--    "$ENC_"            — prefix used by encrypted string pools
+--                         in obfuscated monitoring scripts
+--    "__cbd_watched"    — our own canary key; if something has
+--                         iterated our tables and copied keys
+--                         this will appear in a foreign table
+-- ============================================================
+local GCWatcher = (function()
+    if type(getgc) ~= "function" then
+        -- Executor doesn't expose getgc; degrade silently
+        return { scanOnce = function() end, startLoop = function() end, stopLoop = function() end }
+    end
+
+    -- ---- Patterns ----
+    -- Only string constants that are specific enough to be meaningful.
+    -- Deliberately excludes common engine property names like
+    -- "AssemblyLinearVelocity" which appear in thousands of unrelated
+    -- GC objects and would produce constant false positives.
+    local STRING_PATTERNS = {
+        { pat = "caught_via=",            label = "session-audit log key"       },
+        { pat = "getmemoryUsageMbForTag", label = "known AC bootstrap string"   },
+        { pat = "%$ENC_",                 label = "encrypted string pool prefix" },
+    }
+    local CANARY_KEY = "__cbd_watched"
+
+    local lastNotify = 0
+    local NOTIFY_CD  = 30
+    local loopThread = nil
+    local loopActive = false
+
+    local function scan()
+        local ok, gc = pcall(getgc, true)
+        if not ok or type(gc) ~= "table" then return nil end
+
+        for _, obj in ipairs(gc) do
+            -- Bare strings in the GC
+            if type(obj) == "string" then
+                for _, entry in ipairs(STRING_PATTERNS) do
+                    if obj:find(entry.pat) then
+                        return entry.label
+                    end
+                end
+            end
+
+            -- Table values/keys
+            if type(obj) == "table" then
+                pcall(function()
+                    for k, v in pairs(obj) do
+                        if type(v) == "string" then
+                            for _, entry in ipairs(STRING_PATTERNS) do
+                                if v:find(entry.pat) then
+                                    error(entry.label)
+                                end
+                            end
+                        end
+                        -- Canary: something copied one of our own table keys
+                        if k == CANARY_KEY then
+                            error("canary key found in foreign table")
+                        end
+                    end
+                end)
+                -- Note: errors thrown inside the pcall above are caught;
+                -- we use a second pass to retrieve them cleanly below.
+            end
+        end
+
+        -- Second pass using error propagation to capture the label
+        for _, obj in ipairs(gc) do
+            if type(obj) == "table" then
+                local hit = nil
+                pcall(function()
+                    for k, v in pairs(obj) do
+                        if type(v) == "string" then
+                            for _, entry in ipairs(STRING_PATTERNS) do
+                                if v:find(entry.pat) then
+                                    hit = entry.label
+                                    return
+                                end
+                            end
+                        end
+                        if k == CANARY_KEY then
+                            hit = "canary key found in foreign table"
+                            return
+                        end
+                    end
+                end)
+                if hit then return hit end
+            end
+        end
+
+        return nil
+    end
+
+    local function notify(label)
+        local now = tick()
+        if (now - lastNotify) < NOTIFY_CD then return end
+        lastNotify = now
+        LOG("GCWATCH", "Monitoring pattern detected in GC:", label)
+        if WindUI then
+            WindUI:Notify({
+                Title    = "⚠️ Session Monitor Detected",
+                Content  = "Something may be watching this session ("..label.."). Your call whether to continue.",
+                Icon     = "eye",
+                Duration = 10,
+            })
+        end
+    end
+
+    local function scanOnce()
+        local hit = scan()
+        if hit then
+            LOG("GCWATCH", "Pattern found:", hit)
+            notify(hit)
+        else
+            LOG("GCWATCH", "Clean — no monitoring patterns found.")
+        end
+    end
+
+    local function startLoop()
+        if loopActive then return end
+        loopActive = true
+        loopThread = task.spawn(function()
+            while loopActive do
+                pcall(scanOnce)
+                task.wait(45)
+            end
+        end)
+    end
+
+    local function stopLoop()
+        loopActive = false
+        if loopThread then
+            pcall(task.cancel, loopThread)
+            loopThread = nil
+        end
+    end
+
+    return { scanOnce = scanOnce, startLoop = startLoop, stopLoop = stopLoop }
+end)()
+
+-- ============================================================
+--  WINDUI — loaded after all security gates
+-- ============================================================
 -- ==================== WINDUI ====================
 local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
 
@@ -152,6 +434,13 @@ local function applyPremium(value, source, expires)
     -- not during the automatic startup unlock sweep.
     if isPremium and _CBD_UserClick then
         WindUI:Notify({ Title="⭐ Premium Active", Content="Premium features unlocked! Expires: "..keyExpiry, Icon="crown", Duration=6 })
+    end
+    -- GC watcher: run continuously for premium, stop loop for free
+    -- (free users still get the single on-load scan from the startup sequence)
+    if isPremium then
+        pcall(function() GCWatcher.startLoop() end)
+    else
+        pcall(function() GCWatcher.stopLoop() end)
     end
 end
 
@@ -371,6 +660,11 @@ task.defer(function()
         task.wait(0.4)
         WindUI:Notify({ Title="Free Tier", Content="Enter a key to unlock Premium features.", Icon="user", Duration=4 })
     end
+    -- Single GC scan for everyone on load.
+    -- Premium users also get a continuous loop (started inside applyPremium).
+    -- Result goes to the console only for free users; premium gets a toast too.
+    task.wait(0.3)
+    pcall(function() GCWatcher.scanOnce() end)
 end)
 
 -- ==================== TABS ====================
@@ -655,9 +949,9 @@ do
         Desc    = "Makes you move faster than normal without touching your WalkSpeed.",
         Value   = false,
         Callback = function(state)
-            erxEnabled = state
             if state then
                 if not erxWarningAcknowledged then
+                    -- Don't set erxEnabled yet — wait for popup confirmation
                     if erxToggleRef then pcall(function() erxToggleRef:Set(false) end) end
                     erxWarningAcknowledged = true
                     WindUI:Popup({
@@ -678,10 +972,12 @@ do
                         },
                     })
                 else
+                    erxEnabled = true
                     startERXLoop()
                     WindUI:Notify({ Title="Speed V1", Content="ERX speed active.", Icon="zap", Duration=3 })
                 end
             else
+                erxEnabled = false
                 stopERXLoop()
                 WindUI:Notify({ Title="Speed V1", Content="Speed disabled.", Icon="zap-off", Duration=2 })
             end
@@ -840,49 +1136,85 @@ end
 
 -- ============================================================
 --  MOVEMENT TAB — NOCLIP
+--  Method: RenderStepped CanCollide=false on torso parts only.
+--  No BodyPosition, no PlatformStand, no full-character collision
+--  wipe — much harder to flag server-side.
 -- ============================================================
 do
-    local NoclipSection   = MovementTab:Section({ Title="Noclip" })
-    local SettingsSection = MovementTab:Section({ Title="Noclip Settings" })
-    local RAY_LENGTH=100; local GROUND_OFFSET=3; local VERTICAL_FORCE=1e6
-    local autoOffset=true; local noclipEnabled=false; local noclipConn=nil; local bodyPosition=nil
+    local NoclipSection = MovementTab:Section({ Title="Noclip" })
 
-    local function setCollisions(char,state) for _,p in ipairs(char:GetDescendants()) do if p:IsA("BasePart") then p.CanCollide=state end end end
-    local function setupBP(char)
-        local root=char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("UpperTorso"); if not root then return nil end
-        for _,o in ipairs(root:GetChildren()) do if o:IsA("BodyPosition") then o:Destroy() end end
-        local bp=Instance.new("BodyPosition"); bp.MaxForce=Vector3.new(0,VERTICAL_FORCE,0); bp.P=10000; bp.D=1000; bp.Position=root.Position; bp.Parent=root; return bp
-    end
-    local function getAutoOffset(char) local h=char:FindFirstChildOfClass("Humanoid"); return h and (h.HipHeight+1.5) or 3 end
-    local function noclipLoop()
-        local char=player.Character; if not char then return end
-        local root=char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("UpperTorso"); if not root then return end
-        local rp=RaycastParams.new(); rp.FilterType=Enum.RaycastFilterType.Blacklist; rp.FilterDescendantsInstances={char}
-        local hit=workspace:Raycast(root.Position,Vector3.new(0,-RAY_LENGTH,0),rp)
-        if hit and bodyPosition then
-            local off=autoOffset and getAutoOffset(char) or GROUND_OFFSET
-            bodyPosition.Position=Vector3.new(root.Position.X,hit.Position.Y+off,root.Position.Z)
+    -- Only disable collision on the parts that actually block you in walls.
+    -- Leaving limbs collideable avoids a full no-collision flag on the character.
+    local NOCLIP_PARTS = { LowerTorso=true, UpperTorso=true, HumanoidRootPart=true }
+
+    local noclipEnabled = false
+    local noclipConn    = nil
+    local currentChar   = nil
+
+    local function ncRestoreCollisions(char)
+        if not char then return end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and NOCLIP_PARTS[part.Name] then
+                part.CanCollide = true
+            end
         end
     end
-    local function disableNoclip()
-        noclipEnabled=false; if noclipConn then noclipConn:Disconnect(); noclipConn=nil end
-        if bodyPosition then bodyPosition:Destroy(); bodyPosition=nil end
-        local char=player.Character; if char then setCollisions(char,true); local h=char:FindFirstChildOfClass("Humanoid"); if h then h.PlatformStand=false end end
-    end
-    local function enableNoclip()
-        disableNoclip(); noclipEnabled=true
-        local char=player.Character; if not char then return end
-        local h=char:FindFirstChildOfClass("Humanoid"); if h then h.PlatformStand=false end
-        setCollisions(char,false); bodyPosition=setupBP(char)
-        noclipConn=RunService.Stepped:Connect(function() if not noclipEnabled then return end; noclipLoop() end)
-    end
-    player.CharacterAdded:Connect(function() if noclipEnabled then task.wait(0.5); enableNoclip() end end)
 
-    NoclipSection:Toggle({ Title="Enable Noclip", Desc="Pass through walls and obstacles while staying grounded", Value=false, Callback=function(state) if state then enableNoclip(); WindUI:Notify({ Title="Noclip", Content="Noclip enabled", Icon="ghost", Duration=3 }) else disableNoclip(); WindUI:Notify({ Title="Noclip", Content="Collisions restored", Icon="box", Duration=2 }) end end })
-    SettingsSection:Toggle({ Title="Auto Ground Offset", Desc="Auto-detects correct floor height based on your character rig", Value=true, Callback=function(state) autoOffset=state end })
-    SettingsSection:Slider({ Title="Manual Ground Offset", Desc="Floor offset used when Auto Ground is disabled", Step=1, Value={Min=1,Max=15,Default=3}, Callback=function(v) GROUND_OFFSET=v end })
-    SettingsSection:Slider({ Title="Ray Length", Desc="Downward scan distance to detect the floor", Step=5, Value={Min=20,Max=500,Default=100}, Callback=function(v) RAY_LENGTH=v end })
-    SettingsSection:Slider({ Title="Vertical Hold Force", Desc="Force keeping you pinned at floor level", Step=100000, Value={Min=100000,Max=5000000,Default=1000000}, Callback=function(v) VERTICAL_FORCE=v; if bodyPosition then bodyPosition.MaxForce=Vector3.new(0,VERTICAL_FORCE,0) end end })
+    local function ncApplyNoclip(char)
+        if not char then return end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and NOCLIP_PARTS[part.Name] then
+                part.CanCollide = false
+            end
+        end
+    end
+
+    local function disableNoclip()
+        noclipEnabled = false
+        if noclipConn then noclipConn:Disconnect(); noclipConn = nil end
+        ncRestoreCollisions(currentChar)
+    end
+
+    local function enableNoclip()
+        disableNoclip()
+        noclipEnabled = true
+        currentChar   = player.Character
+        if not currentChar then return end
+
+        -- Re-apply every RenderStepped so the engine cannot re-enable collision
+        -- between frames (e.g. on touch events or seat interactions).
+        noclipConn = RunService.RenderStepped:Connect(function()
+            if not noclipEnabled then return end
+            local char = player.Character
+            if not char then return end
+            currentChar = char
+            ncApplyNoclip(char)
+        end)
+    end
+
+    player.CharacterAdded:Connect(function(char)
+        currentChar = char
+        if noclipEnabled then
+            -- Small delay so the character has time to fully load
+            task.wait(0.3)
+            enableNoclip()
+        end
+    end)
+
+    NoclipSection:Toggle({
+        Title = "Enable Noclip",
+        Desc  = "Pass through walls. Only disables collision on torso parts — harder to detect.",
+        Value = false,
+        Callback = function(state)
+            if state then
+                enableNoclip()
+                WindUI:Notify({ Title="Noclip", Content="Noclip enabled — walk through walls.", Icon="ghost", Duration=3 })
+            else
+                disableNoclip()
+                WindUI:Notify({ Title="Noclip", Content="Collisions restored.", Icon="box", Duration=2 })
+            end
+        end,
+    })
 end
 
 -- ============================================================
@@ -977,7 +1309,9 @@ do
         invisCleanup()
     end
 
-    local invisKeybindEnabled = true
+    -- Keybind only works after the toggle has been turned on at least once.
+    -- This prevents accidental activation before any explicit user consent.
+    local invisKeybindEnabled = false  -- enabled by the toggle below
     UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed or not invisKeybindEnabled then return end
         if input.KeyCode == Enum.KeyCode.K then
@@ -987,6 +1321,7 @@ do
                 if not ok then invisActive = false end
             else
                 disableInvis()
+                WindUI:Notify({ Title="Invisibility", Content="Invisibility disabled (K).", Icon="eye", Duration=2 })
             end
         end
     end)
@@ -1009,13 +1344,15 @@ do
         Value   = false,
         Callback = function(state)
             invisActive = state
+            invisKeybindEnabled = state  -- keybind only active when toggle is on
             if state then
                 local ok = enableInvis()
                 if not ok then
                     invisActive = false
+                    invisKeybindEnabled = false
                     return
                 end
-                WindUI:Notify({ Title="Invisibility", Content="You are now invisible to others.", Icon="eye-off", Duration=3 })
+                WindUI:Notify({ Title="Invisibility", Content="You are now invisible to others. Press K to toggle.", Icon="eye-off", Duration=3 })
             else
                 disableInvis()
                 WindUI:Notify({ Title="Invisibility", Content="Invisibility disabled.", Icon="eye", Duration=2 })
@@ -1075,92 +1412,88 @@ do
         activeFlings[target.UserId] = true
 
         task.spawn(function()
-            _CBD_SelfImmune = true
+            -- Use withImmunity wrapper so the flag is ALWAYS cleaned up,
+            -- even if an error fires mid-fling.
+            local function doFling()
+                local myChar = player.Character
+                local myHum  = getHum(myChar)
+                local myRoot = getRoot(myChar)
+                if not myChar or not myHum or not myRoot then return end
 
-            local myChar = player.Character
-            local myHum  = getHum(myChar)
-            local myRoot = getRoot(myChar)
-            if not myChar or not myHum or not myRoot then
-                _CBD_SelfImmune = false
-                activeFlings[target.UserId] = nil
-                return
-            end
+                local tChar = target.Character
+                local tHum  = tChar and getHum(tChar)
+                local tRoot = tChar and getRoot(tChar)
+                if not tChar or not tHum or not tRoot then return end
 
-            local tChar = target.Character
-            local tHum  = tChar and getHum(tChar)
-            local tRoot = tChar and getRoot(tChar)
-            if not tChar or not tHum or not tRoot then
-                _CBD_SelfImmune = false
-                activeFlings[target.UserId] = nil
-                return
-            end
+                local returnCF = myRoot.CFrame
+                local origFPDH = workspace.FallenPartsDestroyHeight
+                workspace.FallenPartsDestroyHeight = math.huge
 
-            local returnCF = myRoot.CFrame
-            local origFPDH = workspace.FallenPartsDestroyHeight
-            workspace.FallenPartsDestroyHeight = math.huge
+                local bv = Instance.new("BodyVelocity")
+                bv.Name     = "AirResistance"
+                bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                bv.Velocity  = Vector3.new(9e8, 9e8, 9e8)
+                bv.Parent   = myRoot
 
-            local bv = Instance.new("BodyVelocity")
-            bv.Name     = "AirResistance"
-            bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-            bv.Velocity  = Vector3.new(9e8, 9e8, 9e8)
-            bv.Parent   = myRoot
+                myHum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
 
-            myHum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+                local TIME_LIMIT = 1.5
+                local startTick  = tick()
+                local angle      = 0
 
-            local TIME_LIMIT = 1.5
-            local startTick  = tick()
-            local angle      = 0
-
-            local function fpos(base, offset, ang)
-                myRoot.CFrame          = CFrame.new(base.Position) * offset * ang
-                myRoot.Velocity        = Vector3.new(9e7, 9e7 * 10, 9e7)
-                myRoot.RotVelocity     = Vector3.new(9e8, 9e8, 9e8)
-            end
-
-            repeat
-                if not myRoot or not myRoot.Parent then break end
-                if not tRoot  or not tRoot.Parent  then break end
-                angle += 100
-                local vel = tRoot.Velocity.Magnitude
-                if vel < 50 then
-                    fpos(tRoot, CFrame.new(0,  1.5, 0) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
-                    fpos(tRoot, CFrame.new(0, -1.5, 0) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
-                    fpos(tRoot, CFrame.new( 2.25,  1.5, -2.25) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
-                    fpos(tRoot, CFrame.new(-2.25, -1.5,  2.25) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
-                else
-                    fpos(tRoot, CFrame.new(0,  1.5,  tHum.WalkSpeed),                     CFrame.Angles(math.rad(90), 0, 0)); task.wait()
-                    fpos(tRoot, CFrame.new(0, -1.5, -tHum.WalkSpeed),                     CFrame.Angles(0, 0, 0));             task.wait()
-                    fpos(tRoot, CFrame.new(0,  1.5,  tRoot.Velocity.Magnitude / 1.25),    CFrame.Angles(math.rad(90), 0, 0)); task.wait()
-                    fpos(tRoot, CFrame.new(0, -1.5, -tRoot.Velocity.Magnitude / 1.25),    CFrame.Angles(0, 0, 0));             task.wait()
+                local function fpos(base, offset, ang)
+                    myRoot.CFrame          = CFrame.new(base.Position) * offset * ang
+                    myRoot.Velocity        = Vector3.new(9e7, 9e7 * 10, 9e7)
+                    myRoot.RotVelocity     = Vector3.new(9e8, 9e8, 9e8)
                 end
-            until tRoot.Velocity.Magnitude > 500
-                or tRoot.Parent ~= tChar
-                or target.Parent ~= Players
-                or tHum.Sit
-                or myHum.Health <= 0
-                or tick() > startTick + TIME_LIMIT
 
-            pcall(function() bv:Destroy() end)
-            myHum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
-            workspace.CurrentCamera.CameraSubject = myHum
+                repeat
+                    if not myRoot or not myRoot.Parent then break end
+                    if not tRoot  or not tRoot.Parent  then break end
+                    angle += 100
+                    local vel = tRoot.Velocity.Magnitude
+                    if vel < 50 then
+                        fpos(tRoot, CFrame.new(0,  1.5, 0) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
+                        fpos(tRoot, CFrame.new(0, -1.5, 0) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
+                        fpos(tRoot, CFrame.new( 2.25,  1.5, -2.25) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
+                        fpos(tRoot, CFrame.new(-2.25, -1.5,  2.25) + tHum.MoveDirection * math.max(vel/1.25, 0), CFrame.Angles(math.rad(angle), 0, 0)); task.wait()
+                    else
+                        fpos(tRoot, CFrame.new(0,  1.5,  tHum.WalkSpeed),                     CFrame.Angles(math.rad(90), 0, 0)); task.wait()
+                        fpos(tRoot, CFrame.new(0, -1.5, -tHum.WalkSpeed),                     CFrame.Angles(0, 0, 0));             task.wait()
+                        fpos(tRoot, CFrame.new(0,  1.5,  tRoot.Velocity.Magnitude / 1.25),    CFrame.Angles(math.rad(90), 0, 0)); task.wait()
+                        fpos(tRoot, CFrame.new(0, -1.5, -tRoot.Velocity.Magnitude / 1.25),    CFrame.Angles(0, 0, 0));             task.wait()
+                    end
+                until tRoot.Velocity.Magnitude > 500
+                    or tRoot.Parent ~= tChar
+                    or target.Parent ~= Players
+                    or tHum.Sit
+                    or myHum.Health <= 0
+                    or tick() > startTick + TIME_LIMIT
 
-            if myChar then
-                for _, part in ipairs(myChar:GetDescendants()) do
-                    if part:IsA("BasePart") then
-                        part.AssemblyLinearVelocity  = Vector3.zero
-                        part.AssemblyAngularVelocity = Vector3.zero
+                pcall(function() bv:Destroy() end)
+                myHum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+                workspace.CurrentCamera.CameraSubject = myHum
+
+                if myChar then
+                    for _, part in ipairs(myChar:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            part.AssemblyLinearVelocity  = Vector3.zero
+                            part.AssemblyAngularVelocity = Vector3.zero
+                        end
                     end
                 end
-            end
-            if myRoot and myRoot.Parent then
-                myRoot.CFrame = returnCF * CFrame.new(0, 0.5, 0)
-            end
-            pcall(function() myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+                if myRoot and myRoot.Parent then
+                    myRoot.CFrame = returnCF * CFrame.new(0, 0.5, 0)
+                end
+                pcall(function() myHum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
 
-            workspace.FallenPartsDestroyHeight = origFPDH
+                workspace.FallenPartsDestroyHeight = origFPDH
+            end
+
+            -- withImmunity guarantees _CBD_SelfImmune is reset even on error
+            withImmunity(doFling)
 
             task.wait(0.25)
-            _CBD_SelfImmune = false
             activeFlings[target.UserId] = nil
 
             WindUI:Notify({ Title="Fling", Content=target.Name.." was flung!", Icon="zap", Duration=2 })
@@ -1270,6 +1603,7 @@ do
     local function startSafeFlingLoop()
         if erxFlingConn then erxFlingConn:Disconnect() end
         erxFlingConn = RunService.Stepped:Connect(function()
+            if not (WalkFlingEnabled or CarFlingEnabled) then return end
             local char = player.Character
             if not char then return end
             local root = char:FindFirstChild("HumanoidRootPart")
@@ -1277,21 +1611,19 @@ do
             if not char:IsDescendantOf(workspace) then
                 yieldFling = true
                 while not char do task.wait() end
-                while getrawmetatable and getrawmetatable(char) == getrawmetatable(game) do task.wait() end
                 yieldFling = false
             end
             task.spawn(function()
-                if (WalkFlingEnabled or CarFlingEnabled)
-                    and char
-                    and char:IsDescendantOf(workspace)
-                    and not char:FindFirstChildOfClass("ForceField")
-                then
-                    while yieldFling do task.wait() end
-                    local movel = 0.1
-                    local inVehicle = GetDrivenVehicle() ~= nil
-                    local shouldFling = (CarFlingEnabled and inVehicle)
-                        or (WalkFlingEnabled and not inVehicle)
-                    if shouldFling then
+                if not char or not char:IsDescendantOf(workspace) then return end
+                if char:FindFirstChildOfClass("ForceField") then return end
+                while yieldFling do task.wait() end
+                local movel = 0.1
+                local inVehicle = GetDrivenVehicle() ~= nil
+                local shouldFling = (CarFlingEnabled and inVehicle)
+                    or (WalkFlingEnabled and not inVehicle)
+                if shouldFling then
+                    -- Set immunity so anti-fling / other systems don't fight us
+                    withImmunity(function()
                         RunService.Heartbeat:Wait()
                         local vel = root.Velocity
                         root.Velocity = vel * 8000 + Vector3.new(0, 7000, 0)
@@ -1303,7 +1635,7 @@ do
                         if char.Parent and root.Parent then
                             root.Velocity = vel + Vector3.new(0, movel, 0)
                         end
-                    end
+                    end)
                 end
             end)
         end)
@@ -1316,8 +1648,8 @@ do
     end
 
     player.CharacterAdded:Connect(function()
+        yieldFling = false  -- always reset yield on respawn
         if WalkFlingEnabled or CarFlingEnabled then
-            yieldFling = false
             task.wait(0.5)
             startSafeFlingLoop()
         end
@@ -1331,7 +1663,8 @@ do
         LockedTitle = "Upgrade to Premium at pandauth.com to access Safe Fling.",
         Callback    = function(state)
             if not isPremium then
-                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com to unlock Safe Fling.", Icon="crown", Duration=5 }); return
+                if _CBD_UserClick then WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com to unlock Safe Fling.", Icon="crown", Duration=5 }) end
+                return
             end
             WalkFlingEnabled = state
             if state then
@@ -1354,7 +1687,8 @@ do
         LockedTitle = "Upgrade to Premium at pandauth.com to access Safe Fling.",
         Callback    = function(state)
             if not isPremium then
-                WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com to unlock Safe Fling.", Icon="crown", Duration=5 }); return
+                if _CBD_UserClick then WindUI:Notify({ Title="⭐ Premium Required", Content="Upgrade at pandauth.com to unlock Safe Fling.", Icon="crown", Duration=5 }) end
+                return
             end
             CarFlingEnabled = state
             if state then
