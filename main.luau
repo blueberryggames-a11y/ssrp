@@ -1,4 +1,3 @@
-CBD_DEV_MODE = true
 
 -- patched v4
 -- v2: noclip → RenderStepped/CanCollide torso-only, _CBD_SelfImmune leak fixed,
