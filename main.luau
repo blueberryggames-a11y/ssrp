@@ -1206,8 +1206,17 @@ local function afSetupCharacter(char)
     afHeartbeatConn = RunService.Heartbeat:Connect(onAFHeartbeat)
 
     afHum.Died:Once(function()
+        -- Disconnect detection loops immediately so they can't fire on the
+        -- dead/respawning character and trigger a suppression mid-reset.
         if afSteppedConn   then afSteppedConn:Disconnect();   afSteppedConn   = nil end
         if afHeartbeatConn then afHeartbeatConn:Disconnect(); afHeartbeatConn = nil end
+        -- Make absolutely sure the root isn't left anchored — this is the
+        -- main cause of getting stuck after a death or reset.
+        afCorrect = false
+        if afRoot then
+            pcall(function() afRoot.Anchored = false end)
+        end
+        afDestroyAnchor()
     end)
 end
 
@@ -1226,6 +1235,13 @@ local function disableAntiFling()
 end
 
 player.CharacterAdded:Connect(function(char)
+    -- Immediately clear stale refs and any in-flight suppression state so
+    -- lingering task.delay callbacks from the previous life can't anchor
+    -- or reposition the new character.
+    afCorrect = false
+    afRoot    = nil
+    afHum     = nil
+    afChar    = nil
     if AF.Enabled then
         task.wait(0.6)
         afSetupCharacter(char)
@@ -1655,6 +1671,84 @@ local CarFlingToggle = FlingSection:Toggle({
 if not isPremium then
     WalkFlingToggle:Lock()
     CarFlingToggle:Lock()
+end
+
+-- ─────────────────────────────────────────────
+--  Noclip Section (collapsible)
+-- ─────────────────────────────────────────────
+do
+    local NoclipSection = FunTab:Section({
+        Title  = "Noclip",
+        Box    = false,
+        Opened = false,
+    })
+
+    local NOCLIP_PARTS = { Torso=true, LowerTorso=true, UpperTorso=true, HumanoidRootPart=true }
+    local noclipEnabled = false
+    local noclipConn    = nil
+    local currentChar   = nil
+
+    local function ncRestoreCollisions(char)
+        if not char then return end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and NOCLIP_PARTS[part.Name] then
+                part.CanCollide = true
+            end
+        end
+    end
+
+    local function ncApplyNoclip(char)
+        if not char then return end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and NOCLIP_PARTS[part.Name] then
+                part.CanCollide = false
+            end
+        end
+    end
+
+    local function disableNoclip()
+        noclipEnabled = false
+        if noclipConn then noclipConn:Disconnect(); noclipConn = nil end
+        ncRestoreCollisions(currentChar)
+    end
+
+    local function enableNoclip()
+        disableNoclip()
+        noclipEnabled = true
+        currentChar   = player.Character
+        if not currentChar then return end
+        noclipConn = RunService.RenderStepped:Connect(function()
+            if not noclipEnabled then return end
+            local char = player.Character
+            if not char then return end
+            currentChar = char
+            ncApplyNoclip(char)
+        end)
+    end
+
+    player.CharacterAdded:Connect(function(char)
+        currentChar = char
+        if noclipEnabled then
+            task.wait(0.3)
+            enableNoclip()
+        end
+    end)
+
+    NoclipSection:Toggle({
+        Title    = "Enable Noclip",
+        Desc     = "Pass through walls. Only disables collision on torso parts — harder to detect.",
+        Icon     = "ghost",
+        Value    = false,
+        Callback = function(state)
+            if state then
+                enableNoclip()
+                WindUI:Notify({ Title="Noclip", Content="Noclip enabled — walk through walls.", Icon="ghost", Duration=3 })
+            else
+                disableNoclip()
+                WindUI:Notify({ Title="Noclip", Content="Collisions restored.", Icon="box", Duration=2 })
+            end
+        end,
+    })
 end
 
 -- ════════════════════════════════════════════
