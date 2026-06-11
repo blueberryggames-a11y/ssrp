@@ -676,25 +676,13 @@ local function startFlingLoop()
             withImmunity(function()
                 if inVehicle then
                     -- ── Car fling ─────────────────────────────────────────
-                    -- The vehicle's physics are server-owned so we can't
-                    -- write AssemblyLinearVelocity on it from the client.
-                    -- Instead we briefly break the seat weld by setting
-                    -- Humanoid.Sit = false for one frame, spike our own HRP
-                    -- (which we DO own locally), then let the seat re-grab us.
-                    local hum = char:FindFirstChildOfClass("Humanoid")
-                    if not hum then return end
-
-                    -- Remember which seat we were in so we can re-sit
-                    local prevSeat = hum.SeatPart
-
-                    -- Break the weld for one physics frame
-                    hum.Sit = false
-                    RunService.Heartbeat:Wait()
-
-                    -- Spike HRP — now free from the weld constraint
+                    -- Apply a high-velocity impulse to the character's HRP
+                    -- while seated, to fling nearby players. No unsit needed.
                     local vel = root.AssemblyLinearVelocity
                     root.AssemblyLinearVelocity = vel * 8000 + Vector3.new(0, 7000, 0)
 
+                    -- After one frame, gently reset velocity to prevent
+                    -- the player from being flung across the map.
                     RunService.RenderStepped:Wait()
                     if root.Parent then
                         root.AssemblyLinearVelocity = vel
@@ -703,15 +691,6 @@ local function startFlingLoop()
                     if root.Parent then
                         root.AssemblyLinearVelocity = vel + Vector3.new(0, 0.1, 0)
                     end
-
-                    -- Re-sit if the seat is still there and we're still alive
-                    task.delay(0.05, function()
-                        if prevSeat and prevSeat.Parent
-                        and hum and hum.Parent
-                        and hum:GetState() ~= Enum.HumanoidStateType.Dead then
-                            pcall(function() hum.Sit = true end)
-                        end
-                    end)
                 else
                     -- ── Walk fling (unchanged) ────────────────────────────
                     RunService.Heartbeat:Wait()
