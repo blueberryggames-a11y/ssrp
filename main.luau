@@ -2,7 +2,7 @@
 --  Script
 --  UI:      WindUI v1.6.53
 --  Auth:    PandAuth Cookies v4.3
---
+-- PLS SPEED
 --  Tabs:  Movement | Fun | Misc
 --  Premium-only features: Walk Fling, Vehicle Fling
 -- ============================================================
@@ -646,29 +646,6 @@ local function getDrivenVehicle()
     return nil
 end
 
--- Finds the best part to spike velocity on for a vehicle.
--- Prefers PrimaryPart, then the heaviest BasePart (chassis/body),
--- then falls back to the first BasePart found.
-local function getVehicleFlingPart(vehicle)
-    if not vehicle then return nil end
-
-    -- PrimaryPart is the most reliable if set
-    if vehicle.PrimaryPart then return vehicle.PrimaryPart end
-
-    -- Otherwise find the heaviest BasePart — usually the chassis
-    local best, bestMass = nil, -1
-    for _, obj in ipairs(vehicle:GetDescendants()) do
-        if obj:IsA("BasePart") then
-            local m = obj.Mass
-            if m > bestMass then
-                bestMass = m
-                best     = obj
-            end
-        end
-    end
-    return best
-end
-
 local function startFlingLoop()
     if flingConn then flingConn:Disconnect() end
     flingConn = RunService.Stepped:Connect(function()
@@ -694,31 +671,62 @@ local function startFlingLoop()
             local shouldFling = (carFlingEnabled and inVehicle)
                              or (walkFlingEnabled and not inVehicle)
 
-            if shouldFling then
-                -- In a vehicle: spike the vehicle's own root part so the
-                -- whole assembly moves, not just the welded HRP which just
-                -- wobbles against the seat constraint.
-                -- On foot: spike the HRP as before.
-                local flingPart = inVehicle
-                    and getVehicleFlingPart(vehicle)
-                    or  root
+            if not shouldFling then return end
 
-                if not flingPart then return end
+            withImmunity(function()
+                if inVehicle then
+                    -- ── Car fling ─────────────────────────────────────────
+                    -- The vehicle's physics are server-owned so we can't
+                    -- write AssemblyLinearVelocity on it from the client.
+                    -- Instead we briefly break the seat weld by setting
+                    -- Humanoid.Sit = false for one frame, spike our own HRP
+                    -- (which we DO own locally), then let the seat re-grab us.
+                    local hum = char:FindFirstChildOfClass("Humanoid")
+                    if not hum then return end
 
-                withImmunity(function()
+                    -- Remember which seat we were in so we can re-sit
+                    local prevSeat = hum.SeatPart
+
+                    -- Break the weld for one physics frame
+                    hum.Sit = false
                     RunService.Heartbeat:Wait()
-                    local vel = flingPart.AssemblyLinearVelocity
-                    flingPart.AssemblyLinearVelocity = vel * 8000 + Vector3.new(0, 7000, 0)
+
+                    -- Spike HRP — now free from the weld constraint
+                    local vel = root.AssemblyLinearVelocity
+                    root.AssemblyLinearVelocity = vel * 8000 + Vector3.new(0, 7000, 0)
+
                     RunService.RenderStepped:Wait()
-                    if char.Parent and flingPart.Parent then
-                        flingPart.AssemblyLinearVelocity = vel
+                    if root.Parent then
+                        root.AssemblyLinearVelocity = vel
                     end
                     RunService.Stepped:Wait()
-                    if char.Parent and flingPart.Parent then
-                        flingPart.AssemblyLinearVelocity = vel + Vector3.new(0, 0.1, 0)
+                    if root.Parent then
+                        root.AssemblyLinearVelocity = vel + Vector3.new(0, 0.1, 0)
                     end
-                end)
-            end
+
+                    -- Re-sit if the seat is still there and we're still alive
+                    task.delay(0.05, function()
+                        if prevSeat and prevSeat.Parent
+                        and hum and hum.Parent
+                        and hum:GetState() ~= Enum.HumanoidStateType.Dead then
+                            pcall(function() hum.Sit = true end)
+                        end
+                    end)
+                else
+                    -- ── Walk fling (unchanged) ────────────────────────────
+                    RunService.Heartbeat:Wait()
+                    local vel = root.AssemblyLinearVelocity
+                    root.AssemblyLinearVelocity = vel * 8000 + Vector3.new(0, 7000, 0)
+                    RunService.RenderStepped:Wait()
+                    if char.Parent and root.Parent then
+                        root.AssemblyLinearVelocity = vel
+                    end
+                    RunService.Stepped:Wait()
+                    if char.Parent and root.Parent then
+                        root.AssemblyLinearVelocity = vel + Vector3.new(0, 0.1, 0)
+                    end
+                end
+            end)
         end)
     end)
 end
