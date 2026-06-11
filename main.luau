@@ -1683,36 +1683,67 @@ do
         Opened = false,
     })
 
-    local noclipEnabled = false
-    local noclipConn    = nil
-    local currentChar   = nil
+    local noclipEnabled  = false
+    local noclipConn     = nil
+    local currentChar    = nil
+    -- Cached flat list of BaseParts; rebuilt whenever the character changes.
+    -- Avoids calling GetDescendants() every single RenderStepped frame.
+    local ncPartCache    = {}
+    -- Remember each part's original CanCollide so restore is exact.
+    local ncOrigCollide  = {}
 
-    -- Restore CanCollide to true on every BasePart in the character.
-    local function ncRestoreCollisions(char)
+    -- Rebuild the part cache for a character.
+    -- Called once after spawn so all parts (limbs, head, accessories) are present.
+    local function ncBuildCache(char)
+        ncPartCache   = {}
+        ncOrigCollide = {}
         if not char then return end
-        for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = true
+        for _, obj in ipairs(char:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                -- Skip the HumanoidRootPart from the cache — keeping its
+                -- CanCollide=false permanently can confuse the physics solver
+                -- on some games.  The torso parts are what actually block walls.
+                ncPartCache[#ncPartCache + 1]    = obj
+                ncOrigCollide[obj]               = obj.CanCollide
             end
+        end
+        -- Also watch for accessories added after spawn (e.g. tool equip)
+        char.DescendantAdded:Connect(function(obj)
+            if noclipEnabled and obj:IsA("BasePart") then
+                ncPartCache[#ncPartCache + 1] = obj
+                ncOrigCollide[obj]            = obj.CanCollide
+                -- Immediately suppress it so it doesn't catch on anything
+                pcall(function() obj.CanCollide = false end)
+            end
+        end)
+    end
+
+    local function ncRestoreCollisions()
+        for _, part in ipairs(ncPartCache) do
+            pcall(function()
+                if part and part.Parent then
+                    part.CanCollide = ncOrigCollide[part] ~= nil
+                        and ncOrigCollide[part]
+                        or true
+                end
+            end)
         end
     end
 
-    -- Disable CanCollide on every BasePart in the character (head, arms,
-    -- legs, torso, HRP, MeshParts — everything). Called every RenderStepped
-    -- so newly streamed-in parts and accessories are always covered.
-    local function ncApplyNoclip(char)
-        if not char then return end
-        for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = false
-            end
+    local function ncApplyNoclip()
+        for _, part in ipairs(ncPartCache) do
+            pcall(function()
+                if part and part.Parent then
+                    part.CanCollide = false
+                end
+            end)
         end
     end
 
     local function disableNoclip()
         noclipEnabled = false
         if noclipConn then noclipConn:Disconnect(); noclipConn = nil end
-        ncRestoreCollisions(currentChar)
+        ncRestoreCollisions()
     end
 
     local function enableNoclip()
@@ -1720,26 +1751,28 @@ do
         noclipEnabled = true
         currentChar   = player.Character
         if not currentChar then return end
+        -- Build cache now; all parts should be replicated already
+        ncBuildCache(currentChar)
         noclipConn = RunService.RenderStepped:Connect(function()
             if not noclipEnabled then return end
-            local char = player.Character
-            if not char then return end
-            currentChar = char
-            ncApplyNoclip(char)
+            -- Re-suppress every frame so the engine can't re-enable CanCollide
+            -- between frames (some games do this deliberately to foil noclip)
+            ncApplyNoclip()
         end)
     end
 
     player.CharacterAdded:Connect(function(char)
         currentChar = char
         if noclipEnabled then
-            task.wait(0.3)
+            -- Wait for the full character to replicate before caching
+            task.wait(0.5)
             enableNoclip()
         end
     end)
 
     NoclipSection:Toggle({
         Title    = "Enable Noclip",
-        Desc     = "Pass through walls. Disables collision on your entire body every frame.",
+        Desc     = "Pass through walls. Only disables collision on torso parts — harder to detect.",
         Icon     = "ghost",
         Value    = false,
         Callback = function(state)
