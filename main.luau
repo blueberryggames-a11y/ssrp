@@ -1683,24 +1683,27 @@ do
         Opened = false,
     })
 
-    local NOCLIP_PARTS = { Torso=true, LowerTorso=true, UpperTorso=true, HumanoidRootPart=true }
     local noclipEnabled = false
     local noclipConn    = nil
     local currentChar   = nil
 
+    -- Restore CanCollide to true on every BasePart in the character.
     local function ncRestoreCollisions(char)
         if not char then return end
         for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") and NOCLIP_PARTS[part.Name] then
+            if part:IsA("BasePart") then
                 part.CanCollide = true
             end
         end
     end
 
+    -- Disable CanCollide on every BasePart in the character (head, arms,
+    -- legs, torso, HRP, MeshParts — everything). Called every RenderStepped
+    -- so newly streamed-in parts and accessories are always covered.
     local function ncApplyNoclip(char)
         if not char then return end
         for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") and NOCLIP_PARTS[part.Name] then
+            if part:IsA("BasePart") then
                 part.CanCollide = false
             end
         end
@@ -1736,7 +1739,7 @@ do
 
     NoclipSection:Toggle({
         Title    = "Enable Noclip",
-        Desc     = "Pass through walls. Only disables collision on torso parts — harder to detect.",
+        Desc     = "Pass through walls. Disables collision on your entire body every frame.",
         Icon     = "ghost",
         Value    = false,
         Callback = function(state)
