@@ -2,7 +2,7 @@
 --  Script
 --  UI:      WindUI v1.6.53
 --  Auth:    PandAuth Cookies v4.3
--- BABY PLS SPEED
+-- PLS SPEED
 --  Tabs:  Movement | Fun | Misc
 --  Premium-only features: Walk Fling, Vehicle Fling
 -- ============================================================
