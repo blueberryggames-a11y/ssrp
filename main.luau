@@ -2,7 +2,7 @@
 --  Script
 --  UI:      WindUI v1.6.53
 --  Auth:    PandAuth Cookies v4.3
---
+-- broken fixed?
 --  Tabs:  Movement | Fun | Misc
 --  Premium-only features: Walk Fling, Vehicle Fling
 -- ============================================================
@@ -1876,7 +1876,7 @@ end
 local BetaVehicleToggle = FlingSection:Toggle({
     Title    = "Beta: Universal Vehicle Detection",
     Desc     = "⭐ Premium · Detects ANY seat/car model, not just known types. May trigger on benches or chairs — use with care.",
-    Icon     = "flask-conical",
+    Icon     = "shield",
     Value    = false,
     Callback = function(state)
         if not isPremium then return end
@@ -1886,7 +1886,7 @@ local BetaVehicleToggle = FlingSection:Toggle({
             Content  = state
                 and "Will attempt to detect any car model. May trigger on benches/chairs."
                 or  "Reverted to standard vehicle detection.",
-            Icon     = "flask-conical",
+            Icon     = "shield",
             Duration = 4,
         })
     end,
@@ -1899,7 +1899,7 @@ end
 local CarStuckToggle = FlingSection:Toggle({
     Title    = "Beta: Car Stuck Mode",
     Desc     = "⭐ Premium · If your car won't move, this takes over WASD and steers your character directly. A/D to turn, W/S to move.",
-    Icon     = "car-crash",
+    Icon     = "car",
     Value    = false,
     Callback = function(state)
         if not isPremium then return end
@@ -1909,7 +1909,7 @@ local CarStuckToggle = FlingSection:Toggle({
             Content  = state
                 and "WASD now moves you directly. A/D steers, W/S drives."
                 or  "Car Stuck mode disabled.",
-            Icon     = "car-crash",
+            Icon     = "car",
             Duration = 4,
         })
     end,
