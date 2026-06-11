@@ -2,7 +2,7 @@
 --  Script
 --  UI:      WindUI v1.6.53
 --  Auth:    PandAuth Cookies v4.3
--- NOCLIP FIX
+-- UNIVERSAL CAR FLING
 --  Tabs:  Movement | Fun | Misc
 --  Premium-only features: Walk Fling, Vehicle Fling
 -- ============================================================
@@ -581,15 +581,68 @@ local function withImmunity(fn)
     if not ok then warn("[Fling] Error:", err) end
 end
 
+-- ─────────────────────────────────────────────
+--  Vehicle detection mode
+--  false = standard: known seat names + any VehicleSeat class
+--  true  = beta universal: accepts ANY seat the humanoid is
+--          sitting in and walks the model tree for the root
+-- ─────────────────────────────────────────────
+local betaVehicleMode = false
+
+-- Common driver-seat names used across popular Roblox vehicle games.
+local KNOWN_DRIVER_SEAT_NAMES = {
+    DriverSeat      = true,
+    Driver          = true,
+    Seat            = true,
+    VehicleSeat     = true,
+    FrontSeat       = true,
+    ["Driver Seat"] = true,
+    ["Front Seat"]  = true,
+    ["Driver_Seat"] = true,
+    ["DriveSeat"]   = true,
+}
+
+-- Walk up from a seat to the top-level vehicle Model.
+-- Stops at workspace so it never returns the whole game tree.
+-- Skips any Model that contains a Humanoid (i.e. a character).
+local function findVehicleRoot(seat)
+    local cur = seat.Parent
+    while cur and cur ~= workspace do
+        if cur:IsA("Model") and not cur:FindFirstChildOfClass("Humanoid") then
+            return cur
+        end
+        cur = cur.Parent
+    end
+    return nil
+end
+
 local function getDrivenVehicle()
     local char = player.Character
     if not char then return nil end
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum then return nil end
     local seat = hum.SeatPart
-    if seat and seat.Name == "DriverSeat" and seat.Parent then
-        return seat.Parent
+    if not seat or not seat.Parent then return nil end
+
+    -- ── Standard mode ─────────────────────────────────────
+    -- Accept any VehicleSeat class OR a seat with a known name.
+    if seat:IsA("VehicleSeat") or KNOWN_DRIVER_SEAT_NAMES[seat.Name] then
+        return findVehicleRoot(seat) or seat.Parent
     end
+
+    -- ── Beta universal mode ────────────────────────────────
+    -- Accept ANY BasePart the humanoid is seated on, then try
+    -- to locate a vehicle Model above it in the tree.
+    if betaVehicleMode then
+        local root = findVehicleRoot(seat)
+        if root then return root end
+        -- Last resort: direct parent if it's a non-character Model
+        local p = seat.Parent
+        if p and p:IsA("Model") and not p:FindFirstChildOfClass("Humanoid") then
+            return p
+        end
+    end
+
     return nil
 end
 
@@ -1671,6 +1724,29 @@ local CarFlingToggle = FlingSection:Toggle({
 if not isPremium then
     WalkFlingToggle:Lock()
     CarFlingToggle:Lock()
+end
+
+local BetaVehicleToggle = FlingSection:Toggle({
+    Title    = "Beta: Universal Vehicle Detection",
+    Desc     = "⭐ Premium · Detects ANY seat/car model, not just known types. May trigger on benches or chairs — use with care.",
+    Icon     = "flask-conical",
+    Value    = false,
+    Callback = function(state)
+        if not isPremium then return end
+        betaVehicleMode = state
+        WindUI:Notify({
+            Title    = state and "Beta Vehicle Mode ON" or "Beta Vehicle Mode OFF",
+            Content  = state
+                and "Will attempt to detect any car model. May trigger on benches/chairs."
+                or  "Reverted to standard vehicle detection.",
+            Icon     = "flask-conical",
+            Duration = 4,
+        })
+    end,
+})
+
+if not isPremium then
+    BetaVehicleToggle:Lock()
 end
 
 -- ─────────────────────────────────────────────
