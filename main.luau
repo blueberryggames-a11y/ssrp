@@ -2,7 +2,7 @@
 --  Script
 --  UI:      WindUI v1.6.53
 --  Auth:    PandAuth Cookies v4.3
--- UNIVERSAL CAR FLING
+--
 --  Tabs:  Movement | Fun | Misc
 --  Premium-only features: Walk Fling, Vehicle Fling
 -- ============================================================
@@ -646,6 +646,29 @@ local function getDrivenVehicle()
     return nil
 end
 
+-- Finds the best part to spike velocity on for a vehicle.
+-- Prefers PrimaryPart, then the heaviest BasePart (chassis/body),
+-- then falls back to the first BasePart found.
+local function getVehicleFlingPart(vehicle)
+    if not vehicle then return nil end
+
+    -- PrimaryPart is the most reliable if set
+    if vehicle.PrimaryPart then return vehicle.PrimaryPart end
+
+    -- Otherwise find the heaviest BasePart — usually the chassis
+    local best, bestMass = nil, -1
+    for _, obj in ipairs(vehicle:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            local m = obj.Mass
+            if m > bestMass then
+                bestMass = m
+                best     = obj
+            end
+        end
+    end
+    return best
+end
+
 local function startFlingLoop()
     if flingConn then flingConn:Disconnect() end
     flingConn = RunService.Stepped:Connect(function()
@@ -666,22 +689,33 @@ local function startFlingLoop()
             if char:FindFirstChildOfClass("ForceField") then return end
             while yieldFling do task.wait() end
 
-            local inVehicle   = getDrivenVehicle() ~= nil
+            local vehicle   = getDrivenVehicle()
+            local inVehicle = vehicle ~= nil
             local shouldFling = (carFlingEnabled and inVehicle)
                              or (walkFlingEnabled and not inVehicle)
 
             if shouldFling then
+                -- In a vehicle: spike the vehicle's own root part so the
+                -- whole assembly moves, not just the welded HRP which just
+                -- wobbles against the seat constraint.
+                -- On foot: spike the HRP as before.
+                local flingPart = inVehicle
+                    and getVehicleFlingPart(vehicle)
+                    or  root
+
+                if not flingPart then return end
+
                 withImmunity(function()
                     RunService.Heartbeat:Wait()
-                    local vel = root.Velocity
-                    root.Velocity = vel * 8000 + Vector3.new(0, 7000, 0)
+                    local vel = flingPart.AssemblyLinearVelocity
+                    flingPart.AssemblyLinearVelocity = vel * 8000 + Vector3.new(0, 7000, 0)
                     RunService.RenderStepped:Wait()
-                    if char.Parent and root.Parent then
-                        root.Velocity = vel
+                    if char.Parent and flingPart.Parent then
+                        flingPart.AssemblyLinearVelocity = vel
                     end
                     RunService.Stepped:Wait()
-                    if char.Parent and root.Parent then
-                        root.Velocity = vel + Vector3.new(0, 0.1, 0)
+                    if char.Parent and flingPart.Parent then
+                        flingPart.AssemblyLinearVelocity = vel + Vector3.new(0, 0.1, 0)
                     end
                 end)
             end
