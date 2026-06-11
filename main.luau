@@ -2,7 +2,7 @@
 --  Script
 --  UI:      WindUI v1.6.53
 --  Auth:    PandAuth Cookies v4.3
--- broken fixed?
+-- BABY PLS SPEED
 --  Tabs:  Movement | Fun | Misc
 --  Premium-only features: Walk Fling, Vehicle Fling
 -- ============================================================
@@ -762,111 +762,6 @@ player.CharacterAdded:Connect(function()
     if walkFlingEnabled or carFlingEnabled then
         task.wait(0.5)
         startFlingLoop()
-    end
-end)
-
--- ════════════════════════════════════════════
---  FEATURE: CAR STUCK MODE
---  When enabled and the player is seated in a vehicle,
---  takes over WASD movement by CFrame-ing the HRP directly
---  so broken/server-locked car physics don't matter.
---  Steers relative to camera, raycasts down to follow ground.
--- ════════════════════════════════════════════
-local carStuckEnabled  = false
-local carStuckSpeed    = 40      -- studs/s forward/back
-local carStuckTurnSpeed = 90     -- degrees/s turning (A/D)
-local carStuckConn     = nil
-local carStuckYaw      = 0       -- current facing angle in degrees
-
--- Ground-snapping raycast: returns Y just above the surface,
--- or nil if nothing is below within 50 studs.
-local function csGroundY(pos)
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    local char = player.Character
-    if char then params.FilterDescendantsInstances = { char } end
-    local hit = workspace:Raycast(pos, Vector3.new(0, -50, 0), params)
-    if hit then
-        return hit.Position.Y + 3   -- ~hip height above surface
-    end
-    return nil
-end
-
-local function csDisable()
-    carStuckEnabled = false
-    if carStuckConn then carStuckConn:Disconnect(); carStuckConn = nil end
-end
-
-local function csEnable()
-    csDisable()
-    local char = player.Character
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-
-    -- Seed yaw from current HRP facing so there's no snap on enable
-    local lv = root.CFrame.LookVector
-    carStuckYaw = math.deg(math.atan2(-lv.Z, lv.X)) - 90
-
-    carStuckEnabled = true
-
-    carStuckConn = RunService.Heartbeat:Connect(function(dt)
-        if not carStuckEnabled then return end
-
-        -- Only run while actually in a vehicle
-        local vehicle = getDrivenVehicle()
-        if not vehicle then return end
-
-        local c = player.Character
-        if not c then return end
-        local r = c:FindFirstChild("HumanoidRootPart")
-        if not r then return end
-
-        -- ── Read keys ────────────────────────────────────────
-        local fwd   = 0
-        local turn  = 0
-        if UserInputService:IsKeyDown(Enum.KeyCode.W) then fwd  =  1 end
-        if UserInputService:IsKeyDown(Enum.KeyCode.S) then fwd  = -1 end
-        if UserInputService:IsKeyDown(Enum.KeyCode.A) then turn = -1 end
-        if UserInputService:IsKeyDown(Enum.KeyCode.D) then turn =  1 end
-
-        if fwd == 0 and turn == 0 then return end  -- idle: let car sit
-
-        -- ── Update yaw ───────────────────────────────────────
-        carStuckYaw = carStuckYaw + turn * carStuckTurnSpeed * dt
-
-        -- ── Build movement vector ────────────────────────────
-        local rad     = math.rad(carStuckYaw)
-        local dirX    = math.sin(rad)
-        local dirZ    = math.cos(rad)
-        local moveVec = Vector3.new(dirX, 0, dirZ) * (carStuckSpeed * fwd * dt)
-
-        -- ── New position ─────────────────────────────────────
-        local cur  = r.Position
-        local newX = cur.X + moveVec.X
-        local newZ = cur.Z + moveVec.Z
-        local newY = csGroundY(Vector3.new(newX, cur.Y + 5, newZ)) or cur.Y
-
-        -- ── Apply CFrame ─────────────────────────────────────
-        -- Facing direction from yaw
-        local facingCF = CFrame.new(
-            Vector3.new(newX, newY, newZ),
-            Vector3.new(newX + dirX, newY, newZ + dirZ)
-        )
-        r.CFrame = facingCF
-    end)
-end
-
-local function setCarStuckEnabled(state)
-    if state then csEnable() else csDisable() end
-end
-
-player.CharacterAdded:Connect(function(char)
-    local was = carStuckEnabled
-    csDisable()
-    if was then
-        task.wait(1)
-        csEnable()
     end
 end)
 
@@ -1876,7 +1771,7 @@ end
 local BetaVehicleToggle = FlingSection:Toggle({
     Title    = "Beta: Universal Vehicle Detection",
     Desc     = "⭐ Premium · Detects ANY seat/car model, not just known types. May trigger on benches or chairs — use with care.",
-    Icon     = "shield",
+    Icon     = "flask-conical",
     Value    = false,
     Callback = function(state)
         if not isPremium then return end
@@ -1886,7 +1781,7 @@ local BetaVehicleToggle = FlingSection:Toggle({
             Content  = state
                 and "Will attempt to detect any car model. May trigger on benches/chairs."
                 or  "Reverted to standard vehicle detection.",
-            Icon     = "shield",
+            Icon     = "flask-conical",
             Duration = 4,
         })
     end,
@@ -1894,53 +1789,6 @@ local BetaVehicleToggle = FlingSection:Toggle({
 
 if not isPremium then
     BetaVehicleToggle:Lock()
-end
-
-local CarStuckToggle = FlingSection:Toggle({
-    Title    = "Beta: Car Stuck Mode",
-    Desc     = "⭐ Premium · If your car won't move, this takes over WASD and steers your character directly. A/D to turn, W/S to move.",
-    Icon     = "car",
-    Value    = false,
-    Callback = function(state)
-        if not isPremium then return end
-        setCarStuckEnabled(state)
-        WindUI:Notify({
-            Title    = state and "Car Stuck Mode ON" or "Car Stuck Mode OFF",
-            Content  = state
-                and "WASD now moves you directly. A/D steers, W/S drives."
-                or  "Car Stuck mode disabled.",
-            Icon     = "car",
-            Duration = 4,
-        })
-    end,
-})
-
-FlingSection:Slider({
-    Title    = "Car Stuck Speed",
-    Desc     = "⭐ Premium · How fast Car Stuck Mode moves you forward/back.",
-    Icon     = "gauge",
-    Step     = 5,
-    Value    = { Min = 5, Max = 200, Default = 40 },
-    Callback = function(value)
-        if not isPremium then return end
-        carStuckSpeed = value
-    end,
-})
-
-FlingSection:Slider({
-    Title    = "Car Stuck Turn Speed",
-    Desc     = "⭐ Premium · How fast you turn left/right (degrees per second).",
-    Icon     = "rotate-cw",
-    Step     = 5,
-    Value    = { Min = 20, Max = 360, Default = 90 },
-    Callback = function(value)
-        if not isPremium then return end
-        carStuckTurnSpeed = value
-    end,
-})
-
-if not isPremium then
-    CarStuckToggle:Lock()
 end
 
 -- ─────────────────────────────────────────────
