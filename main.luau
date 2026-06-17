@@ -7,6 +7,7 @@
 -- fixed respawn freeze bug
 -- mm2 esp
 -- Vechicle fling fixxxx
+-- ADDED NEW VEHILCE SPEED FUTURE!!!!
 --  Premium-only features: Walk Fling, Vehicle Fling
 -- ============================================================
 
