@@ -259,10 +259,10 @@ local function refreshRefs(char)
     rootPart  = char:WaitForChild("HumanoidRootPart", 5)
 end
 
-if player.Character then refreshRefs(player.Character) end
+if player.Character then task.spawn(refreshRefs, player.Character) end
 
 player.CharacterAdded:Connect(function(newChar)
-    refreshRefs(newChar)
+    task.spawn(refreshRefs, newChar)
 end)
 
 -- ════════════════════════════════════════════
@@ -316,39 +316,6 @@ end
 local _hooked = setmetatable({}, { __mode = "k" })
 
 -- ─────────────────────────────────────────────
---  Dummy RBXScriptSignal
---  Returned for DescendantAdded / ChildAdded reads.
---  Connect / Once / Wait are no-ops so no listener
---  ever fires.  Built once; shared by all parts.
--- ─────────────────────────────────────────────
-local _dummySignal
-do
-    local _noop = function() end
-
-    local _stubConn = newproxy(true)
-    local _scmt     = getmetatable(_stubConn)
-    _scmt.__index    = function(_, k)
-        if k == "Connected" then return false end
-        return _noop
-    end
-    _scmt.__newindex = _noop
-    _scmt.__tostring = function() return "RBXScriptConnection{stub}" end
-
-    _dummySignal = newproxy(true)
-    local _dsmt  = getmetatable(_dummySignal)
-    _dsmt.__index = function(_, k)
-        if k == "Connect" or k == "Once" then
-            return function(_, _cb) return _stubConn end
-        end
-        if k == "Wait"      then return function() return end end
-        if k == "Connected" then return false end
-        return _noop
-    end
-    _dsmt.__newindex = _noop
-    _dsmt.__tostring = function() return "RBXScriptSignal{stub}" end
-end
-
--- ─────────────────────────────────────────────
 --  Wraps a function in newcclosure if available,
 --  otherwise returns it as-is.
 -- ─────────────────────────────────────────────
@@ -384,13 +351,6 @@ local function applyOverridesToPart(part)
         local partName = part.Name
 
         mt.__index = makeClosure(function(self, key)
-
-            -- ── Dummy-event stubs ──────────────────────────────────
-            -- DescendantAdded and ChildAdded return a never-firing
-            -- signal; any listener connected to them is a no-op.
-            if key == "DescendantAdded" or key == "ChildAdded" then
-                return _dummySignal
-            end
 
             -- ── Property overrides ─────────────────────────────────
             -- Per-part table wins over wildcard table.
@@ -571,7 +531,6 @@ end)
 local _SelfImmune      = false
 local walkFlingEnabled = false
 local carFlingEnabled  = false
-local yieldFling       = false
 local flingConn        = nil
 
 local function withImmunity(fn)
@@ -656,15 +615,12 @@ local function startFlingLoop()
         if not root then return end
 
         if not char:IsDescendantOf(workspace) then
-            yieldFling = true
-            while not char do task.wait() end
-            yieldFling = false
+            return
         end
 
         task.spawn(function()
             if not char or not char:IsDescendantOf(workspace) then return end
             if char:FindFirstChildOfClass("ForceField") then return end
-            while yieldFling do task.wait() end
 
             local vehicle   = getDrivenVehicle()
             local inVehicle = vehicle ~= nil
@@ -758,7 +714,6 @@ local function setCarFling(state)
 end
 
 player.CharacterAdded:Connect(function()
-    yieldFling = false
     if walkFlingEnabled or carFlingEnabled then
         task.wait(0.5)
         startFlingLoop()
@@ -991,10 +946,11 @@ local function setFlyEnabled(state)
     if state then fv2Enable() else fv2Disable() end
 end
 
-player.CharacterAdded:Connect(function()
+player.CharacterAdded:Connect(function(char)
     if fv2Enabled then
         fv2Enabled = false
         task.wait(1)
+        if player.Character ~= char then return end
         fv2Enable()
     end
 end)
@@ -1287,8 +1243,9 @@ local function afSetupCharacter(char)
     afDestroyAnchor()
 
     afChar    = char
-    afHum     = char:WaitForChild("Humanoid")
-    afRoot    = char:WaitForChild("HumanoidRootPart")
+    afHum     = char:WaitForChild("Humanoid", 5)
+    afRoot    = char:WaitForChild("HumanoidRootPart", 5)
+    if not afHum or not afRoot or not char.Parent then return end
     afPrevVel = afRoot.AssemblyLinearVelocity
     afPrevCF  = afRoot.CFrame
     afSafeCF  = afRoot.CFrame
@@ -1339,6 +1296,7 @@ player.CharacterAdded:Connect(function(char)
     afChar    = nil
     if AF.Enabled then
         task.wait(0.6)
+        if player.Character ~= char then return end
         afSetupCharacter(char)
     end
 end)
@@ -1454,6 +1412,7 @@ player.CharacterAdded:Connect(function(char)
     ijDisable()
     if was then
         task.wait(1)
+        if player.Character ~= char then return end
         ijEnable()
     end
 end)
