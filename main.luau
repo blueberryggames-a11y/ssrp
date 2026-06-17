@@ -1671,7 +1671,365 @@ InfJumpSection:Button({
 })
 
 -- ════════════════════════════════════════════
---  TAB 2 — FUN
+--  TAB 2 — VISUALS
+-- ════════════════════════════════════════════
+local VisualsTab = Window:Tab({
+    Title = "Visuals",
+    Icon  = "eye",
+})
+
+-- ─────────────────────────
+--  ESP State
+-- ─────────────────────────
+local espEnabled    = false
+local espRoleColor  = true   -- color box by role (murderer=red, sheriff=blue, innocent=green)
+local espBoxColor   = Color3.fromRGB(0, 255, 0)  -- fallback custom color
+local espGunEnabled = false
+local espHighlights = {}  -- [player] = { highlight, billboard, roleLabel, teamConn }
+
+-- Role cache: populated from local PlayerGui for self, item-scan for others
+local espRoleCache  = {}  -- [player] = "Murderer" | "Sheriff" | "Innocent"
+
+-- ─────────────────────────
+--  Role detection (item-based, same as the working MM2 reference)
+-- ─────────────────────────
+local function parseRoleText(t)
+    t = (t or ""):lower()
+    if t:find("murder") then return "Murderer" end
+    if t:find("sheriff") then return "Sheriff"  end
+    if t:find("innocent") then return "Innocent" end
+    return nil
+end
+
+-- Hook the local player's Role label in PlayerGui so we know our own role
+local function hookRoleLabel(lbl)
+    if not lbl or not lbl:IsA("TextLabel") then return end
+    local r = parseRoleText(lbl.Text)
+    if r then espRoleCache[player] = r end
+    lbl:GetPropertyChangedSignal("Text"):Connect(function()
+        local role = parseRoleText(lbl.Text)
+        if role then espRoleCache[player] = role end
+    end)
+end
+
+local function scanLocalRoleLabel()
+    local pg = player:FindFirstChild("PlayerGui")
+    if not pg then return end
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d.Name == "Role" and d:IsA("TextLabel") then
+            hookRoleLabel(d)
+        end
+    end
+end
+
+task.spawn(function()
+    local pg = player:WaitForChild("PlayerGui", 10)
+    if not pg then return end
+    pg.DescendantAdded:Connect(function(d)
+        if d.Name == "Role" and d:IsA("TextLabel") then hookRoleLabel(d) end
+    end)
+    scanLocalRoleLabel()
+end)
+player.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    scanLocalRoleLabel()
+end)
+
+-- Detect role from items in character or backpack (works for other players)
+local function getRoleFromItems(plr)
+    local char = plr.Character
+    local bp   = pcall(function() return plr.Backpack end) and plr.Backpack
+    if char then
+        if char:FindFirstChild("Knife") or (bp and bp:FindFirstChild("Knife")) then
+            return "Murderer"
+        end
+        if char:FindFirstChild("Gun") or (bp and bp:FindFirstChild("Gun")) then
+            return "Sheriff"
+        end
+    end
+    return "Innocent"
+end
+
+-- Resolve final role: cache first (for local player), items fallback for others
+local function getRole(plr)
+    if espRoleCache[plr] then return espRoleCache[plr] end
+    return getRoleFromItems(plr)
+end
+
+local ROLE_COLORS = {
+    Murderer = Color3.fromRGB(255, 60,  60),
+    Sheriff  = Color3.fromRGB(80,  150, 255),
+    Innocent = Color3.fromRGB(0,   255, 80),
+}
+
+local function getRoleColor(plr)
+    if espRoleColor then
+        local role = getRole(plr)
+        return ROLE_COLORS[role] or espBoxColor
+    end
+    return espBoxColor
+end
+
+local function getRoleLabel(plr)
+    return "[" .. getRole(plr) .. "]"
+end
+
+-- ─────────────────────────
+--  Gun ESP
+-- ─────────────────────────
+local function createGunESP(gun)
+    if not espGunEnabled then return end
+    if gun:FindFirstChild("_GunESP") then return end
+
+    local h = Instance.new("Highlight")
+    h.Name                 = "_GunESP"
+    h.FillColor            = Color3.fromRGB(170, 120, 255)
+    h.FillTransparency     = 0.65
+    h.OutlineTransparency  = 0.2
+    h.DepthMode            = Enum.HighlightDepthMode.AlwaysOnTop
+    h.Parent               = gun
+
+    local bb = Instance.new("BillboardGui", gun)
+    bb.Name          = "_GunESP"
+    bb.Size          = UDim2.new(0, 120, 0, 20)
+    bb.StudsOffset   = Vector3.new(0, 2.5, 0)
+    bb.AlwaysOnTop   = true
+
+    local lbl = Instance.new("TextLabel", bb)
+    lbl.Size                   = UDim2.new(1, 0, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text                   = "Gun Dropped"
+    lbl.TextColor3             = Color3.fromRGB(210, 190, 255)
+    lbl.Font                   = Enum.Font.GothamBold
+    lbl.TextScaled             = true
+    lbl.TextStrokeTransparency = 0
+end
+
+local function removeAllGunESP()
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v.Name == "_GunESP" then pcall(function() v:Destroy() end) end
+    end
+end
+
+-- Watch for gun drops in workspace
+workspace.DescendantAdded:Connect(function(obj)
+    if obj.Name == "GunDrop" and obj:IsA("BasePart") then
+        createGunESP(obj)
+    end
+end)
+
+-- ─────────────────────────
+--  Player ESP helpers
+-- ─────────────────────────
+local function createESPForPlayer(plr)
+    if plr == player then return end
+    if espHighlights[plr] then return end
+    local char = plr.Character
+    if not char then return end
+
+    local color = getRoleColor(plr)
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name                = "_ESP_Highlight"
+    highlight.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillTransparency    = 0.85
+    highlight.OutlineTransparency = 0
+    highlight.FillColor           = color
+    highlight.OutlineColor        = color
+    highlight.Adornee             = char
+    highlight.Parent              = char
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name        = "_ESP_Billboard"
+    billboard.AlwaysOnTop = true
+    billboard.Size        = UDim2.new(0, 200, 0, 45)
+    billboard.StudsOffset = Vector3.new(0, 3.5, 0)
+    billboard.Parent      = char
+
+    local usernameLabel = Instance.new("TextLabel")
+    usernameLabel.BackgroundTransparency = 1
+    usernameLabel.Size                   = UDim2.new(1, 0, 0.5, 0)
+    usernameLabel.Position               = UDim2.new(0, 0, 0, 0)
+    usernameLabel.Text                   = plr.DisplayName .. " (@" .. plr.Name .. ")"
+    usernameLabel.TextColor3             = Color3.fromRGB(255, 255, 255)
+    usernameLabel.TextStrokeTransparency = 0
+    usernameLabel.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
+    usernameLabel.TextScaled             = true
+    usernameLabel.Font                   = Enum.Font.GothamBold
+    usernameLabel.Parent                 = billboard
+
+    local roleLabel = Instance.new("TextLabel")
+    roleLabel.BackgroundTransparency = 1
+    roleLabel.Size                   = UDim2.new(1, 0, 0.5, 0)
+    roleLabel.Position               = UDim2.new(0, 0, 0.5, 0)
+    roleLabel.Text                   = getRoleLabel(plr)
+    roleLabel.TextColor3             = color
+    roleLabel.TextStrokeTransparency = 0
+    roleLabel.TextStrokeColor3       = Color3.fromRGB(0, 0, 0)
+    roleLabel.TextScaled             = true
+    roleLabel.Font                   = Enum.Font.GothamBold
+    roleLabel.Parent                 = billboard
+
+    espHighlights[plr] = {
+        highlight   = highlight,
+        billboard   = billboard,
+        roleLabel   = roleLabel,
+    }
+end
+
+local function removeESPForPlayer(plr)
+    local data = espHighlights[plr]
+    if not data then return end
+    pcall(function() data.highlight:Destroy() end)
+    pcall(function() data.billboard:Destroy() end)
+    espHighlights[plr] = nil
+end
+
+-- Update colors + role labels on all existing highlights (called every 0.4s)
+local function updateESPColors()
+    for plr, data in pairs(espHighlights) do
+        pcall(function()
+            local color = getRoleColor(plr)
+            data.highlight.FillColor    = color
+            data.highlight.OutlineColor = color
+            data.roleLabel.TextColor3   = color
+            data.roleLabel.Text         = getRoleLabel(plr)
+        end)
+    end
+end
+
+local function enableESP()
+    espEnabled = true
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player then createESPForPlayer(plr) end
+    end
+end
+
+local function disableESP()
+    espEnabled = false
+    for plr in pairs(espHighlights) do removeESPForPlayer(plr) end
+    espHighlights = {}
+end
+
+-- New players
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function()
+        if not espEnabled then return end
+        task.wait(0.5)
+        createESPForPlayer(plr)
+    end)
+    if espEnabled and plr.Character then createESPForPlayer(plr) end
+end)
+
+Players.PlayerRemoving:Connect(function(plr)
+    removeESPForPlayer(plr)
+end)
+
+-- Respawns for existing players
+for _, plr in ipairs(Players:GetPlayers()) do
+    if plr ~= player then
+        plr.CharacterAdded:Connect(function()
+            if not espEnabled then return end
+            removeESPForPlayer(plr)
+            task.wait(0.5)
+            createESPForPlayer(plr)
+        end)
+    end
+end
+
+-- Main loop: re-catch any missing players and refresh role colors every 0.4s
+task.spawn(function()
+    while true do
+        task.wait(0.4)
+        if espEnabled then
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= player and plr.Character and not espHighlights[plr] then
+                    createESPForPlayer(plr)
+                end
+            end
+            updateESPColors()
+        end
+    end
+end)
+
+-- ─────────────────────────
+--  ESP Section (UI)
+-- ─────────────────────────
+local ESPSection = VisualsTab:Section({
+    Title  = "ESP",
+    Box    = false,
+    Opened = true,
+})
+
+ESPSection:Toggle({
+    Title    = "Player ESP",
+    Desc     = "Draws a highlight + name/role label on all players through walls.",
+    Icon     = "scan",
+    Value    = false,
+    Callback = function(state)
+        if state then enableESP() else disableESP() end
+        WindUI:Notify({
+            Title    = state and "ESP ON" or "ESP OFF",
+            Content  = state and "Tracking all players." or "ESP disabled.",
+            Icon     = state and "scan" or "scan-line",
+            Duration = 3,
+        })
+    end,
+})
+
+ESPSection:Toggle({
+    Title    = "Role Colors",
+    Desc     = "Color boxes by role: Murderer=Red, Sheriff=Blue, Innocent=Green.",
+    Icon     = "users",
+    Value    = true,
+    Callback = function(state)
+        espRoleColor = state
+        updateESPColors()
+        WindUI:Notify({
+            Title    = state and "Role Colors ON" or "Role Colors OFF",
+            Content  = state and "Boxes colored by Murderer/Sheriff/Innocent." or "Using custom box color.",
+            Icon     = "palette",
+            Duration = 3,
+        })
+    end,
+})
+
+ESPSection:Toggle({
+    Title    = "Gun ESP",
+    Desc     = "Highlights dropped guns in workspace and shows a label.",
+    Icon     = "crosshair",
+    Value    = false,
+    Callback = function(state)
+        espGunEnabled = state
+        if not state then removeAllGunESP() end
+        WindUI:Notify({
+            Title    = state and "Gun ESP ON" or "Gun ESP OFF",
+            Content  = state and "Dropped guns will be highlighted." or "Gun ESP disabled.",
+            Icon     = "crosshair",
+            Duration = 3,
+        })
+    end,
+})
+
+ESPSection:Toggle({
+    Title    = "Custom Box Color",
+    Desc     = "Pick a custom color used when Role Colors is OFF.",
+    Icon     = "pipette",
+    Value    = false,
+    ColorPicker = {
+        Title = "Box Color",
+        Value = Color3.fromRGB(0, 255, 0),
+        Callback = function(color)
+            espBoxColor = color
+            if not espRoleColor then updateESPColors() end
+        end,
+    },
+    Callback = function(_) end,
+})
+
+
+-- ════════════════════════════════════════════
+--  TAB 3 — FUN
 -- ════════════════════════════════════════════
 local FunTab = Window:Tab({
     Title = "Fun",
