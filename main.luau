@@ -6,7 +6,7 @@
 --  Tabs:  Movement | Fun | Misc
 -- fixed respawn freeze bug
 -- mm2 esp
--- Vechicle fling fix
+-- Vechicle fling fixxxx
 --  Premium-only features: Walk Fling, Vehicle Fling
 -- ============================================================
 
