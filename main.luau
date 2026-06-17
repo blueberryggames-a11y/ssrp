@@ -5,6 +5,7 @@
 -- PLS SPEEDDDDDDDDDDDdd
 --  Tabs:  Movement | Fun | Misc
 -- fixed respawn freeze bug
+-- mm2 esp
 --  Premium-only features: Walk Fling, Vehicle Fling
 -- ============================================================
 
