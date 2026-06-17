@@ -4,6 +4,7 @@
 --  Auth:    PandAuth Cookies v4.3
 -- PLS SPEEDDDDDDDDDDDdd
 --  Tabs:  Movement | Fun | Misc
+-- fixed respawn freeze bug
 --  Premium-only features: Walk Fling, Vehicle Fling
 -- ============================================================
 
