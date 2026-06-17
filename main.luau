@@ -2207,6 +2207,228 @@ do
     })
 end
 
+-- ─────────────────────────────────────────────
+--  Vehicle Speed Section (collapsible)
+-- ─────────────────────────────────────────────
+do
+    local VehicleSpeedSection = FunTab:Section({
+        Title  = "Vehicle Speed",
+        Box    = false,
+        Opened = false,
+    })
+
+    -- ── State ─────────────────────────────────────────────────────────────
+    local vsEnabled    = false
+    local vsSpeed      = 100   -- target speed in studs/s
+    local vsBoostOnKey = false
+    local vsKeyHeld    = false
+    local vsConn       = nil
+
+    -- ── Helpers ───────────────────────────────────────────────────────────
+
+    -- Same detection as vehicle fling: getDrivenVehicle() covers VehicleSeat
+    -- class AND all known custom seat names (DriverSeat, FrontSeat, etc.)
+    -- Returns (vehicle Model, physics BasePart) or (nil, nil).
+    local function vsGetVehiclePart()
+        local vehicle = getDrivenVehicle()
+        if not vehicle then return nil, nil, nil end
+        local part = vehicle.PrimaryPart
+                  or vehicle:FindFirstChildOfClass("BasePart")
+        local char = player.Character
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        local seat = hum and hum.SeatPart
+        return vehicle, part, seat
+    end
+
+    local function vsApplyBoost(part, seat, dt)
+        if not part or not part.Parent then return end
+        pcall(function()
+            local throttle = seat and seat.Throttle or 0
+            if throttle <= 0 then return end
+
+            local active = vsBoostOnKey and vsKeyHeld or not vsBoostOnKey
+            if not active then return end
+
+            local vel      = part.AssemblyLinearVelocity
+            local curSpeed = vel.Magnitude
+
+            -- Ramp up at 150 studs/s² — fast enough to feel it, slow enough
+            -- to stay in control. Direction stays as vel.Unit so steering
+            -- and ramps are never overridden.
+            local newSpeed = curSpeed + math.min(150 * dt, math.max(0, vsSpeed - curSpeed))
+            if newSpeed <= curSpeed then return end
+
+            part.AssemblyLinearVelocity = vel.Unit * newSpeed
+        end)
+    end
+
+    -- Traction: store original PhysicalProperties so we can restore them
+    local vsTractionCache = {}  -- { [part] = originalCustomPhysicalProperties }
+
+    local function vsApplyTraction(vehicle)
+        if not vehicle then return end
+        for _, p in ipairs(vehicle:GetDescendants()) do
+            if p:IsA("BasePart") then
+                pcall(function()
+                    -- Store original
+                    if not vsTractionCache[p] then
+                        vsTractionCache[p] = p.CustomPhysicalProperties
+                    end
+                    local orig = vsTractionCache[p]
+                    -- Build boosted properties: max out Friction and FrictionWeight,
+                    -- keep everything else from the original if it exists.
+                    local density     = orig and orig.Density          or 0.7
+                    local friction    = 2.0  -- max meaningful friction
+                    local elasticity  = orig and orig.Elasticity       or 0.0
+                    local fricWeight  = orig and orig.FrictionWeight   or 1.0
+                    local elaWeight   = orig and orig.ElasticityWeight or 1.0
+                    p.CustomPhysicalProperties = PhysicalProperties.new(
+                        density, friction, elasticity, fricWeight, elaWeight
+                    )
+                end)
+            end
+        end
+    end
+
+    local function vsRestoreTraction()
+        for p, orig in pairs(vsTractionCache) do
+            pcall(function()
+                if p and p.Parent then
+                    p.CustomPhysicalProperties = orig
+                end
+            end)
+        end
+        vsTractionCache = {}
+    end
+
+    local vsTractionApplied = false
+
+    local function vsStart()
+        if vsConn then vsConn:Disconnect() end
+        vsTractionApplied = false
+        vsConn = RunService.Heartbeat:Connect(function(dt)
+            if not vsEnabled then return end
+            local vehicle, part, seat = vsGetVehiclePart()
+            if not part then
+                -- Left vehicle, reset so traction re-applies next time
+                if vsTractionApplied then
+                    vsRestoreTraction()
+                    vsTractionApplied = false
+                end
+                return
+            end
+            -- Apply traction once per vehicle session, not every frame
+            if not vsTractionApplied then
+                vsApplyTraction(vehicle)
+                vsTractionApplied = true
+            end
+            vsApplyBoost(part, seat, dt)
+        end)
+    end
+
+    local function vsStop()
+        vsEnabled = false
+        if vsConn then vsConn:Disconnect(); vsConn = nil end
+        vsRestoreTraction()
+    end
+
+    -- ── UserInputService key-hold detection ───────────────────────────────
+    local UIS = game:GetService("UserInputService")
+    local VS_BOOST_KEY = Enum.KeyCode.E
+
+    UIS.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == VS_BOOST_KEY then vsKeyHeld = true end
+    end)
+    UIS.InputEnded:Connect(function(input)
+        if input.KeyCode == VS_BOOST_KEY then vsKeyHeld = false end
+    end)
+
+    -- ── UI ────────────────────────────────────────────────────────────────
+
+    VehicleSpeedSection:Toggle({
+        Title    = "Enable Vehicle Speed Boost",
+        Desc     = "Raises your vehicle's MaxSpeed so it can go faster without injecting velocity.",
+        Icon     = "gauge",
+        Value    = false,
+        Callback = function(state)
+            vsEnabled = state
+            if state then
+                vsStart()
+                WindUI:Notify({
+                    Title    = "Vehicle Speed ON",
+                    Content  = "Speed set to " .. vsSpeed .. " studs/s.",
+                    Icon     = "gauge",
+                    Duration = 3,
+                })
+            else
+                vsStop()
+                WindUI:Notify({
+                    Title    = "Vehicle Speed OFF",
+                    Content  = "Vehicle MaxSpeed restored.",
+                    Icon     = "gauge",
+                    Duration = 2,
+                })
+            end
+        end,
+    })
+
+    VehicleSpeedSection:Slider({
+        Title    = "Boost Speed",
+        Desc     = "Target speed in studs/s while boosting. Stock cars are ~50-100.",
+        Icon     = "zap",
+        Step     = 10,
+        Value    = { Min = 50, Max = 500, Default = 100 },
+        Callback = function(value)
+            vsSpeed = value
+        end,
+    })
+
+    VehicleSpeedSection:Toggle({
+        Title    = "Hold-Key Boost Mode",
+        Desc     = "Only applies the speed boost while you hold [E]. Release to return to stock speed.",
+        Icon     = "keyboard",
+        Value    = false,
+        Callback = function(state)
+            vsBoostOnKey = state
+            WindUI:Notify({
+                Title    = state and "Hold-Key Mode ON" or "Hold-Key Mode OFF",
+                Content  = state
+                    and "Hold [E] while driving to boost speed."
+                    or  "Speed boost is now always-on when enabled.",
+                Icon     = "keyboard",
+                Duration = 3,
+            })
+        end,
+    })
+
+    VehicleSpeedSection:Button({
+        Title    = "Stop Boost Now",
+        Desc     = "Immediately cuts the speed boost (same as toggling off).",
+        Icon     = "rotate-ccw",
+        Callback = function()
+            local _, part = vsGetVehiclePart()
+            if part then
+                vsStop()
+                vsEnabled = false
+                WindUI:Notify({
+                    Title    = "Boost Stopped",
+                    Content  = "Vehicle speed boost cut.",
+                    Icon     = "rotate-ccw",
+                    Duration = 2,
+                })
+            else
+                WindUI:Notify({
+                    Title    = "Not in a Vehicle",
+                    Content  = "Sit in a vehicle first.",
+                    Icon     = "car",
+                    Duration = 2,
+                })
+            end
+        end,
+    })
+end
+
 -- ════════════════════════════════════════════
 --  TAB 3 — MISC
 -- ════════════════════════════════════════════
